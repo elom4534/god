@@ -21,7 +21,7 @@ export class BookmakerController {
     if (!draft_id || !provider || !stake) {
       throw new HttpException({ error: 'MISSING_FIELDS', reason_code: 'MISSING_FIELDS' }, HttpStatus.BAD_REQUEST);
     }
-    const draft: any = (CouponsController as any).getDraft?.(draft_id);
+    const draft: any = await (CouponsController as any).getDraft?.(draft_id);
     if (!draft) {
       throw new HttpException({ error: 'DRAFT_NOT_FOUND_OR_EXPIRED', reason_code: 'DRAFT_EXPIRED' }, HttpStatus.NOT_FOUND);
     }
@@ -108,7 +108,7 @@ export class BookmakerController {
       }));
 
       // Invalider draft après succès
-      (CouponsController as any).deleteDraft?.(draft_id);
+      await (CouponsController as any).deleteDraft?.(draft_id);
 
       return mockResponse;
     } catch (e: any) {

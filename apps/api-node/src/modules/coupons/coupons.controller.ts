@@ -2,9 +2,18 @@ import { Controller, Post, Body, UseGuards, Headers, BadRequestException } from 
 import axios from 'axios';
 import { CountryPolicyGuard } from '../../common/guards/country-policy.guard';
 import { v4 as uuid } from 'uuid';
+import { createClient } from 'redis';
 
-// In-memory store pour MVP (remplacer par Postgres + Redis en prod)
-const DRAFTS = new Map<string, any>();
+// Stockage des brouillons de coupon: Redis (TTL 5 min) avec fallback mémoire
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const DRAFT_TTL_SEC = 5 * 60;
+let redisClient: any = null;
+async function getRedis() {
+  if (redisClient) return redisClient;
+  try { redisClient = createClient({ url: REDIS_URL }); await redisClient.connect(); return redisClient; } catch { return null; }
+}
+// Fallback mémoire si Redis indisponible
+const DRAFTS_MEM = new Map<string, any>();
 
 @Controller()
 export class CouponsController {
@@ -119,7 +128,12 @@ export class CouponsController {
       _internal_picks: picksData.picks,
       country,
     };
-    DRAFTS.set(draftId, draft);
+    const r = await getRedis();
+    if (r) {
+      try { await r.setEx(`coupon:draft:${draftId}`, DRAFT_TTL_SEC, JSON.stringify(draft)); } catch { DRAFTS_MEM.set(draftId, draft); }
+    } else {
+      DRAFTS_MEM.set(draftId, draft);
+    }
 
     // Audit log
     console.log(JSON.stringify({ level:'audit', action:'coupons/generate', draft_id: draftId, mode, format: couponFormat, selections_count: selections.length, country }));
@@ -129,7 +143,22 @@ export class CouponsController {
     return publicDraft;
   }
 
-  // Helper pour bookmaker controller (accès interne)
-  static getDraft(draftId: string) { return DRAFTS.get(draftId); }
-  static deleteDraft(draftId: string) { return DRAFTS.delete(draftId); }
+  // Helper pour bookmaker controller (accès interne) — Redis + fallback mémoire
+  static async getDraft(draftId: string): Promise<any> {
+    const r = await getRedis();
+    if (r) {
+      try {
+        const raw = await r.get(`coupon:draft:${draftId}`);
+        if (raw) return JSON.parse(raw);
+      } catch { /* fallback */ }
+    }
+    return DRAFTS_MEM.get(draftId);
+  }
+  static async deleteDraft(draftId: string): Promise<boolean> {
+    const r = await getRedis();
+    if (r) {
+      try { await r.del(`coupon:draft:${draftId}`); } catch { /* ignore */ }
+    }
+    return DRAFTS_MEM.delete(draftId);
+  }
 }
