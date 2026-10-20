@@ -85,6 +85,9 @@ function resolveB2bType(marketType: string, tags: string[], name: string): numbe
 export class CombinedCouponService {
   private readonly logger = new Logger(CombinedCouponService.name);
 
+  /** Limite produit : 50 matchs maximum par combiné. */
+  private readonly maxMatches = parseInt(process.env.MAX_COUPON_MATCHES || '50', 10);
+
   /** Garde-fou technique uniquement (protection mémoire) — pas une limite produit. */
   private readonly maxEventsScanned = parseInt(process.env.COUPON_MAX_EVENTS_SCANNED || '5000', 10);
   private readonly marginThreshold = parseFloat(process.env.MARGIN_THRESHOLD_PERCENT || '5');
@@ -229,6 +232,7 @@ export class CombinedCouponService {
       total_events: new Set(pool.map(p => p.event_id)).size,
       total_picks: pool.length,
       margin_threshold: this.marginThreshold,
+      max_matches: this.maxMatches,
     };
   }
 
@@ -272,6 +276,14 @@ export class CombinedCouponService {
         error: 'INVALID_INPUT',
         reason_code: 'INVALID_NUM_MATCHES',
         message: 'Le nombre de matchs doit être un entier supérieur ou égal à 1.',
+      });
+    }
+    if (n > this.maxMatches) {
+      throw new BadRequestException({
+        error: 'INVALID_INPUT',
+        reason_code: 'TOO_MANY_MATCHES',
+        message: `Le nombre de matchs est limité à ${this.maxMatches} par combiné.`,
+        details: { max: this.maxMatches, requested: n },
       });
     }
     if (!Number.isFinite(target) || target < 1.01) {
@@ -485,7 +497,10 @@ export class CombinedCouponService {
       b2b_lng: language || 'en',
     }));
 
-    let couponMode: 'SINGLE' | 'PER_PICK' | 'NONE' = 'NONE';
+    let couponMode: 'COMBO' | 'SINGLE' | 'PER_PICK' | 'NONE' = 'NONE';
+    // Renseigné quand MegaPari limite la création (1 code / minute) : le client
+    // attend ce délai puis relance automatiquement.
+    let retryAfterSeconds: number | null = null;
     let couponCode: string | null = null;
     let deepLink: string | null = process.env.MEGAPARI_AFFILIATE_URL || 'https://megapari.com/en';
     let message = 'Composition prête — ouvre MegaPari et ajoute les sélections.';
@@ -504,57 +519,91 @@ export class CombinedCouponService {
       error: string | null;
     }> = [];
 
-    if (b2bPicks.length === 1 || includeIndividualCodes) {
-      if (b2bPicks.length === 1) {
-        try {
-          const res = await this.mega.generateCoupon(b2bPicks, { currency, language });
-          couponMode = 'SINGLE';
-          couponCode = res.couponCode;
-          deepLink = res.deepLink;
-          message = res.message;
-          coupons.push({
-            event_id: picks[0].event_id,
-            home: picks[0].home,
-            away: picks[0].away,
-            selection_name: picks[0].selection_name,
-            market_type: picks[0].market_type,
-            line: picks[0].line,
-            odds: picks[0].odds,
-            success: true,
-            couponCode: res.couponCode,
-            deepLink: res.deepLink,
-            error: null,
-          });
-        } catch (e: any) {
-          const body = e?.getResponse?.() ?? e?.response?.data ?? null;
-          success = false;
-          message = body?.message || e?.message || 'Échec de la génération du coupon MegaPari';
-        }
-      } else {
-        const results = await this.mega.generateSeparateCoupons(b2bPicks, { currency, language });
-        couponMode = 'PER_PICK';
-        let ok = 0;
-        results.forEach((r, i) => {
-          const p = picks[i];
-          if (r.success) ok++;
-          coupons.push({
-            event_id: p.event_id,
-            home: p.home,
-            away: p.away,
-            selection_name: p.selection_name,
-            market_type: p.market_type,
-            line: p.line,
-            odds: p.odds,
-            success: r.success,
-            couponCode: r.couponCode,
-            deepLink: r.deepLink,
-            error: r.error,
-          });
+    // 1) Cas mono-sélection : coupon simple.
+    if (b2bPicks.length === 1) {
+      try {
+        const res = await this.mega.generateCoupon(b2bPicks, { currency, language });
+        couponMode = 'SINGLE';
+        couponCode = res.couponCode;
+        deepLink = res.deepLink;
+        message = res.message;
+        coupons.push({
+          event_id: picks[0].event_id,
+          home: picks[0].home,
+          away: picks[0].away,
+          selection_name: picks[0].selection_name,
+          market_type: picks[0].market_type,
+          line: picks[0].line,
+          odds: picks[0].odds,
+          success: true,
+          couponCode: res.couponCode,
+          deepLink: res.deepLink,
+          error: null,
         });
-        success = ok > 0;
-        message = ok === picks.length
-          ? `${ok} codes générés — un par sélection : ajoute-les à ton coupon MegaPari.`
-          : `${ok}/${picks.length} codes générés — certains marchés ne sont plus disponibles.`;
+      } catch (e: any) {
+        const body = e?.getResponse?.() ?? e?.response?.data ?? null;
+        success = false;
+        message = body?.message || e?.message || 'Échec de la génération du coupon MegaPari';
+      }
+    } else if (includeIndividualCodes) {
+      // 2) Mode explicite « un code par sélection » (fallback manuel).
+      const results = await this.mega.generateSeparateCoupons(b2bPicks, { currency, language });
+      couponMode = 'PER_PICK';
+      let ok = 0;
+      results.forEach((r, i) => {
+        const p = picks[i];
+        if (r.success) ok++;
+        coupons.push({
+          event_id: p.event_id,
+          home: p.home,
+          away: p.away,
+          selection_name: p.selection_name,
+          market_type: p.market_type,
+          line: p.line,
+          odds: p.odds,
+          success: r.success,
+          couponCode: r.couponCode,
+          deepLink: r.deepLink,
+          error: r.error,
+        });
+      });
+      success = ok > 0;
+      message = ok === picks.length
+        ? `${ok} codes générés — un par sélection.`
+        : `${ok}/${picks.length} codes générés — certains marchés ne sont plus disponibles.`;
+    } else {
+      // 3) Cas nominal : UN code coupon pour tout le combiné (confirmé par le
+      //    manager MegaPari). Toutes les sélections partent dans la même requête.
+      try {
+        const res = await this.mega.shareCouponCombined(b2bPicks, { language });
+        couponMode = 'COMBO';
+        couponCode = res.couponCode;
+        deepLink = res.deepLink;
+        message = `Code coupon combiné généré (${picks.length} sélections) — code ${res.couponCode}`;
+        coupons.push({
+          event_id: '*',
+          home: '',
+          away: '',
+          selection_name: `${picks.length} sélections`,
+          market_type: 'COMBO',
+          line: null,
+          odds: composed.totalOdds,
+          success: true,
+          couponCode: res.couponCode,
+          deepLink: res.deepLink,
+          error: null,
+        });
+      } catch (e: any) {
+        const body = e?.getResponse?.() ?? e?.response?.data ?? null;
+        const reason = typeof body?.reason_code === 'string' ? body.reason_code : 'B2B_COUPON_FAILED';
+        success = false;
+        couponMode = 'NONE';
+        message = body?.message || e?.message || 'Échec de la génération du coupon combiné MegaPari';
+        const ra = body?.details?.retry_after_seconds;
+        if (reason === 'B2B_RATE_LIMITED' && Number.isFinite(Number(ra))) {
+          retryAfterSeconds = Number(ra);
+        }
+        this.logger.warn(`[COMBINED] coupon combiné indisponible (${reason}) — fallback sélection par sélection`);
       }
     }
 
@@ -571,6 +620,7 @@ export class CombinedCouponService {
       couponMode,
       couponCode,
       success,
+      retryAfterSeconds,
     }));
 
     return {
@@ -588,6 +638,7 @@ export class CombinedCouponService {
       couponCode,
       deepLink,
       message,
+      retry_after_seconds: retryAfterSeconds,
       coupons,
       picks: picks.map(p => ({
         event_id: p.event_id,

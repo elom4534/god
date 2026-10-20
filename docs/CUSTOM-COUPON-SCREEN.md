@@ -9,11 +9,12 @@ Backend : `apps/api-node/src/modules/coupons/` (NestJS) + ETL `pipelines/etl/ing
 
 | Règle | État |
 |---|---|
-| Nombre de matchs | **libre**, aucune limite produit (seule contrainte : matchs réellement disponibles) |
+| Nombre de matchs | **1 à 50 maximum** (`MAX_COUPON_MATCHES`, exposé par `max_matches`) — au-delà : `TOO_MANY_MATCHES` |
 | Côte totale visée | **libre**, aucune limite (≥ 1.01) |
 | Discipline | liste des **sports réels du bookmaker** (répertoire officiel), ou « Tous les sports » |
 | Recherche | sur **tous les marchés validés de chaque match** (1X2, Double chance, Handicap, Totaux, BTTS…) |
 | Résultat | cote obtenue + **écart en %** avec la cible + drapeau `exact` |
+| Code coupon | **UN SEUL code pour tout le combiné** (`couponMode: "COMBO"`) |
 
 Le moteur ne fabrique jamais de cote : il choisit parmi les cotes réellement proposées.
 
@@ -32,8 +33,9 @@ Répertoire officiel (`/datafeed/directories/api/v2/sports`) enrichi du nombre d
     { "id": 9,  "name": "Boxing",     "events": 0,   "picks": 0,    "available": false }
   ],
   "total_events": 180,
-  "total_picks": 2116,
-  "margin_threshold": 5
+  "total_picks": 2108,
+  "margin_threshold": 5,
+  "max_matches": 50
 }
 ```
 
@@ -50,19 +52,22 @@ Réponse :
 ```json
 {
   "success": true,
-  "couponMode": "NONE",
-  "label": "Combiné 30 matchs - Côte 1000.29",
-  "targetTotalOdds": 1000,
-  "totalOdds": 1000.29,
-  "gapPercent": 0.03,
+  "couponMode": "COMBO",
+  "label": "Combiné 50 matchs - Côte 4997.59",
+  "targetTotalOdds": 5000,
+  "totalOdds": 4997.59,
+  "gapPercent": 0.05,
   "exact": false,
-  "numMatches": 30,
-  "sport": 1,
+  "numMatches": 50,
+  "sport": null,
   "sports": ["Football"],
-  "couponCode": null,
-  "deepLink": "https://megapari.com/en",
-  "message": "Composition prête — ouvre MegaPari et ajoute les sélections.",
-  "coupons": [],
+  "couponCode": "YZLAH",
+  "deepLink": "https://megapari.com/en?coupon-code=YZLAH",
+  "message": "Code coupon combiné généré (50 sélections) — code YZLAH",
+  "retry_after_seconds": null,
+  "coupons": [ { "event_id": "*", "market_type": "COMBO", "selection_name": "50 sélections",
+                 "odds": 4997.59, "success": true, "couponCode": "YZLAH",
+                 "deepLink": "https://megapari.com/en?coupon-code=YZLAH" } ],
   "picks": [ { "event_id": "…", "home": "…", "away": "…", "league": "…",
                "sport_id": 1, "sport_name": "Football",
                "market_type": "OVER_UNDER", "selection_name": "Total (2.5) Over",
@@ -71,9 +76,17 @@ Réponse :
 ```
 
 `couponMode` :
-- `SINGLE` — 1 seul match : vrai code coupon + deep link pré-rempli ;
-- `NONE` — composition seule (N > 1) : l'utilisateur demande le code sélection par sélection ;
-- `PER_PICK` — codes générés côté serveur (option `include_individual_codes: true`).
+- **`COMBO` (défaut)** — **un seul code coupon pour tout le combiné** : toutes les
+  sélections partent dans une seule requête `sharecoupon` (paramètres répétés) ;
+- `SINGLE` — 1 seul match (même mécanique, un seul élément) ;
+- `PER_PICK` — codes générés côté serveur, un par sélection (option `include_individual_codes: true`) ;
+- `NONE` — pas de code (MegaPari indisponible) : la composition reste utilisable.
+
+Erreurs :
+| Code | HTTP | Sens |
+|---|---|---|
+| `TOO_MANY_MATCHES` | 400 | `num_matches > max_matches` (`details: {max, requested}`) |
+| `B2B_RATE_LIMITED` | 400 | créneau occupé (1 code / minute) → `retry_after_seconds` |
 
 ### `POST /api/v1/coupons/pick-code`
 ```json
@@ -114,8 +127,10 @@ marchés disponibles de chaque match sont parcourus.
 | 8 matchs → 25 | 25.12 | 0.47 % | — |
 | 12 matchs → 100 | 99.99 | 0.01 % | — |
 | 30 matchs → 1000 | 1000.29 | 0.03 % | — |
-| 50 matchs → 5000 | 5018.51 | 0.37 % | — |
-| 120 matchs → 50000 | 49800.15 | 0.40 % | — |
+| 50 matchs → 5000 | 4997.59 | 0.05 % | — (code `YZLAH` / `LMSAH`) |
+
+> 50 matchs = plafond produit. Une demande à 51 est refusée (`TOO_MANY_MATCHES`),
+> côté API comme dans le formulaire (`Maximum 50 matchs`).
 
 ---
 
@@ -135,13 +150,37 @@ L'ETL interroge `Count` (max 1000) sur LoadSingle, récupère le **répertoire d
 
 ---
 
-## 5. Limite MegaPari (inchangée)
+## 5. Code coupon combiné (vérifié le 20/10/2026)
 
-`sharecoupon` (BetB2B) ne crée **qu'un coupon par marché** : aucun endpoint « combiné »
-n'est documenté. Le produit ne fabrique donc pas de faux code combiné — composition
-réelle + un code par sélection, généré à la demande.
+Le manager MegaPari a confirmé que la génération d'un code pour un combiné est autorisée.
+Vérification faite sur la passerelle BetB2B : `sharecoupon` **accepte les paramètres
+répétés** et renvoie un vrai code combiné.
 
----
+```
+GET {gateway}/datafeed/directories/api/v1/sharecoupon
+    ?ref=192
+    &sportEventId=A&sportEventId=B&type=..&type=..&oddsMarket=..&oddsMarket=..[&parameter=..&parameter=..]
+    &kind=3&lng=en
+→ "https://megapari.com/en?coupon-code=XXXXX"
+```
+
+- La réponse est une **chaîne JSON entre guillemets** ; `coupon-code=` est extrait.
+- 50 sélections tiennent dans **une seule requête** (testé : cotes 1.04 → 1.29, code `RYZ1H`).
+- Le endpoint **ne valide rien** (un `type` inexistant renvoie quand même un code) :
+  la validation métier reste côté composition (marge, marchés réels).
+- `couponCode` est renvoyé avant la liste des sélections dans l'UI : plus besoin de
+  faire défiler 50 lignes pour récupérer le code.
+
+### Limite de débit : 1 code / minute
+
+| Constat | Correctif |
+|---|---|
+| 2 créations rapprochées → 400 « LiveBetService returned 200 » | **créneau partagé** Redis `bookmaker:share-slot:megapari` (`MEGAPARI_SHARE_INTERVAL_MS`, 65 s) |
+| Bloquer la requête pour attendre = coupure du proxy Alwaysdata (~30 s) | l'API répond **en < 1 s** avec `retry_after_seconds` |
+| L'utilisateur devait recliquer | l'app **attend le délai en affichant un compte à rebours**, puis relance automatiquement (3 essais max) |
+
+Cache : clé `bookmaker:combo:megapari:{ref}:{sha1(ref|sélections)}` — TTL 15 min, donc un
+combiné identique réutilise son code sans re-solliciter la passerelle.
 
 ## 6. Robustesse B2B (découvertes du 20/10/2026)
 
@@ -150,5 +189,6 @@ réelle + un code par sélection, généré à la demande.
 | `getAccessToken` → HTTP 400 | décoder `&amp;` dans `client_secret` |
 | `setEx` « Invalid argument type » | signature `setEx(key, ttl, value)` |
 | `GET sharecoupon` → 400 « LiveBetService returned 200 » alors que curl passe | en-tête `Accept: */*` obligatoire |
-| 400 sur tous les appels pendant ~1 min | throttle 20 s + cooldown 60 s sur `B2B_RATE_LIMITED` |
+| 400 sur tous les appels pendant ~1 min | créneau 1 code/65 s + `retry_after_seconds` + reprise auto côté app |
 | mêmes sélections re-testées sans fin | cache coupon 15 min |
+| deux combinés distincts recevaient **le même code** | clé de cache tronquée (base64 90 car.) → **SHA-1** de la signature complète |

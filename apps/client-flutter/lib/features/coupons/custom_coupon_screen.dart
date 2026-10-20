@@ -40,6 +40,9 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
   final _oddsFocus = FocusNode();
 
   bool _loading = false;
+
+  /// Message de progression (ex. attente du créneau MegaPari 1 code/minute).
+  String? _progressMessage;
   String? _error;
   String? _errorCode;
   Map<String, dynamic>? _result;
@@ -54,9 +57,14 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
 
   /// Compteurs pour la discipline sélectionnée.
   int? _availableEvents;
+  int _maxMatches = defaultMaxMatches;
   int? _availablePicks;
 
   static const _matchPresets = <int>[2, 3, 5, 7, 10];
+
+  /// Limite produit par défaut : 50 matchs par combiné. La valeur réelle est
+  /// lue sur `GET /coupons/sports` (`max_matches`) et sert de repli hors ligne.
+  static const int defaultMaxMatches = 50;
   static const _oddsPresets = <double>[2.0, 2.5, 5.0, 10.0, 25.0, 50.0];
 
   @override
@@ -95,6 +103,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         final list = (decoded is Map && decoded['sports'] is List) ? decoded['sports'] as List : const [];
         setState(() {
           _sports = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+          final mm = decoded['max_matches'];
+          if (mm is num && mm > 0) _maxMatches = mm.toInt();
           _loadingSports = false;
         });
         return;
@@ -154,8 +164,52 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       _errorCode = null;
       _result = null;
       _pickCodes.clear();
+      _progressMessage = null;
     });
 
+    // MegaPari n'accepte qu'**un code coupon par minute**. Quand le créneau est
+    // occupé, l'API répond en < 1 s avec `retry_after_seconds` : on attends le
+    // délai indiqué en affichant un compte à rebours, puis on relance
+    // automatiquement. Aucune requête HTTP longue → pas de coupure proxy.
+    const maxAttempts = 3;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      final outcome = await _postGenerate(numMatches, targetOdds);
+      if (outcome.retryAfter != null && attempt < maxAttempts && outcome.retryAfter! <= 120) {
+        var remaining = outcome.retryAfter!;
+        while (remaining > 0 && mounted) {
+          setState(() {
+            _progressMessage = _isFr
+                ? 'MegaPari autorise 1 code coupon par minute — nouvelle tentative dans $remaining s'
+                : 'MegaPari allows 1 coupon code per minute — retrying in $remaining s';
+          });
+          await Future.delayed(const Duration(seconds: 1));
+          remaining--;
+        }
+        continue;
+      }
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _progressMessage = null;
+        _result = outcome.result;
+        _errorCode = outcome.errorCode;
+        _error = outcome.error;
+      });
+      final mode = (outcome.result?['couponMode'] ?? '').toString();
+      if (outcome.result != null && outcome.result!['success'] == false && mode == 'SINGLE') {
+        setState(() {
+          _errorCode = 'B2B_UNAVAILABLE';
+          _error = (outcome.result!['message'] ?? 'Coupon non généré par MegaPari.').toString();
+        });
+      }
+      return;
+    }
+  }
+
+  bool get _isFr => Localizations.localeOf(context).languageCode == 'fr';
+
+  /// Un appel HTTP à `generate-combined`, traduit en résultat exploitable.
+  Future<_GenerateOutcome> _postGenerate(int numMatches, double targetOdds) async {
     try {
       final res = await http
           .post(
@@ -172,32 +226,32 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       final decoded = _safeDecode(res.body);
 
       if (res.statusCode >= 200 && res.statusCode < 300 && decoded is Map<String, dynamic>) {
-        setState(() {
-          _result = decoded;
-          _loading = false;
-        });
-        final mode = (decoded['couponMode'] ?? '').toString();
-        if (decoded['success'] == false && mode == 'SINGLE') {
-          setState(() {
-            _errorCode = 'B2B_UNAVAILABLE';
-            _error = (decoded['message'] ?? 'Coupon non généré par MegaPari.').toString();
-          });
-        }
-        return;
+        // MegaPari peut refuser le créneau : la réponse (200) porte alors
+        // `retry_after_seconds`, qu'on utilise pour relancer automatiquement.
+        final ra = int.tryParse((decoded['retry_after_seconds'] ?? '').toString());
+        return _GenerateOutcome(
+          result: decoded,
+          retryAfter: decoded['success'] == false && ra != null ? ra : null,
+        );
       }
 
       final code = _extractReasonCode(decoded);
-      setState(() {
-        _errorCode = code;
-        _error = _humanError(code, decoded);
-        _loading = false;
-      });
+      final retryAfter = int.tryParse(
+        ((decoded is Map ? decoded['details'] : null) is Map
+                ? (decoded['details'] as Map)['retry_after_seconds']
+                : null)
+            .toString(),
+      );
+      return _GenerateOutcome(
+        errorCode: code,
+        error: _humanError(code, decoded),
+        retryAfter: code == 'B2B_RATE_LIMITED' ? retryAfter : null,
+      );
     } catch (e) {
-      setState(() {
-        _errorCode = 'NETWORK';
-        _error = 'Connexion impossible. Vérifie ta connexion puis réessaie.\n($e)';
-        _loading = false;
-      });
+      return _GenerateOutcome(
+        errorCode: 'NETWORK',
+        error: 'Connexion impossible. Vérifie ta connexion puis réessaie.\n($e)',
+      );
     }
   }
 
@@ -311,7 +365,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     if (_loading) return false;
     final n = int.tryParse(_numCtrl.text.trim());
     final t = double.tryParse(_oddsCtrl.text.trim().replaceAll(',', '.'));
-    if (n == null || n < 1) return false;
+    if (n == null || n < 1 || n > _maxMatches) return false;
     if (t == null || t < 1.01) return false;
     if (_availableEvents != null && _availableEvents! > 0 && n > _availableEvents!) return false;
     return true;
@@ -377,8 +431,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               const SizedBox(height: 16),
               Text(
                 isFr
-                    ? 'Le moteur parcourt tous les marchés validés de chaque match (marge ≤ seuil) et retient la sélection qui rapproche le plus le combiné de ta côte cible. Aucune limite de matchs ni de cote.'
-                    : 'The engine scans every validated market of each match (margin ≤ threshold) and keeps the selection that brings the accumulator closest to your target odds. No match or odds limit.',
+                    ? 'Le moteur parcourt tous les marchés validés de chaque match (marge ≤ seuil) et retient la sélection qui rapproche le plus le combiné de ta côte cible. Jusqu\'à $_maxMatches matchs par combiné, côte libre — un seul code coupon pour tout le combiné.'
+                    : 'The engine scans every validated market of each match (margin ≤ threshold) and keeps the selection that brings the accumulator closest to your target odds. Up to $_maxMatches matches per accumulator, odds free — one single coupon code for the whole accumulator.',
                 style: TextStyle(fontSize: 10.5, color: Colors.grey[600], height: 1.35),
                 textAlign: TextAlign.center,
               ),
@@ -580,14 +634,15 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                   icon: Icons.sports_soccer,
                   helper: _availableEvents != null
                       ? (isFr
-                          ? 'Choisis librement — $_availableEvents matchs disponibles'
-                          : 'Choose freely — $_availableEvents matches available')
-                      : (isFr ? 'Choisis librement, sans limite' : 'Choose freely, no limit'),
+                          ? '1 à $_maxMatches matchs — $_availableEvents disponibles'
+                          : '1 to $_maxMatches matches — $_availableEvents available')
+                      : (isFr ? '1 à $_maxMatches matchs' : '1 to $_maxMatches matches'),
                 ),
                 validator: (v) {
                   final n = int.tryParse((v ?? '').trim());
                   if (n == null) return isFr ? 'Saisis un nombre' : 'Enter a number';
                   if (n < 1) return isFr ? 'Au moins 1 match' : 'At least 1 match';
+                  if (n > _maxMatches) return isFr ? 'Maximum $_maxMatches matchs' : 'Max $_maxMatches matches';
                   if (_availableEvents != null && _availableEvents! > 0 && n > _availableEvents!) {
                     return isFr
                         ? 'Seulement $_availableEvents matchs disponibles'
@@ -655,8 +710,10 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                       : const Icon(Icons.auto_awesome),
                   label: Text(
                     _loading
-                        ? (isFr ? 'Recherche de la meilleure combinaison…' : 'Searching best combination…')
+                        ? (_progressMessage ??
+                            (isFr ? 'Recherche de la meilleure combinaison…' : 'Searching best combination…'))
                         : (isFr ? 'Générer le Code Coupon' : 'Generate Coupon Code'),
+                    textAlign: TextAlign.center,
                     style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
                   ),
                   style: FilledButton.styleFrom(
@@ -857,6 +914,16 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                             ].join('  •  '),
                             style: TextStyle(fontSize: 12, color: Colors.grey[700]),
                           ),
+                          if (couponMode == 'COMBO' && couponCode != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                isFr
+                                    ? 'Un seul code pour les $numMatches sélections'
+                                    : 'One single code for all $numMatches selections',
+                                style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: Colors.green),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -864,6 +931,20 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                 ),
                 const SizedBox(height: 12),
                 _targetVsAchieved(isFr, cs, targetOdds: targetOdds, achieved: totalOdds, gap: gap, exact: exact),
+                // Le code coupon est placé AVANT la liste des sélections :
+                // avec 50 matchs, l'utilisateur ne doit pas faire défiler
+                // 50 lignes pour récupérer son code.
+                if (couponCode != null && couponCode.isNotEmpty && deepLink != null) ...[
+                  const SizedBox(height: 12),
+                  CouponCodeCard(
+                    couponCode: couponCode,
+                    deepLink: deepLink,
+                    message: (r['message'] ?? '').toString().isNotEmpty
+                        ? r['message'].toString()
+                        : (isFr ? 'Coupon généré — colle ce code dans MegaPari' : 'Coupon generated — paste this code in MegaPari'),
+                    onOpen: () => _openMegaPari(deepLink),
+                  ),
+                ],
                 const SizedBox(height: 14),
                 if (picks.isEmpty)
                   Text(
@@ -871,24 +952,15 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                     style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                   )
                 else
-                  ...picks.map((p) => _pickTile(p as Map<String, dynamic>, cs, isFr: isFr)),
+                  ...picks.map((p) => _pickTile(p as Map<String, dynamic>, cs, isFr: isFr, showCodeButton: couponCode == null)),
               ],
             ),
           ),
         ),
         if (couponCode != null && couponCode.isNotEmpty && deepLink != null) ...[
-          const SizedBox(height: 14),
-          CouponCodeCard(
-            couponCode: couponCode,
-            deepLink: deepLink,
-            message: (r['message'] ?? '').toString().isNotEmpty
-                ? r['message'].toString()
-                : (isFr ? 'Coupon généré — colle ce code dans MegaPari' : 'Coupon generated — paste this code in MegaPari'),
-            onOpen: () => _openMegaPari(deepLink),
-          ),
           const SizedBox(height: 12),
           _howToCard(isFr),
-        ] else if (couponMode != 'SINGLE') ...[
+        ] else if (couponMode == 'NONE') ...[
           const SizedBox(height: 14),
           _multiCouponNotice(isFr),
           if (deepLink != null) ...[
@@ -954,7 +1026,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     );
   }
 
-  Widget _pickTile(Map<String, dynamic> p, ColorScheme cs, {required bool isFr}) {
+  Widget _pickTile(Map<String, dynamic> p, ColorScheme cs, {required bool isFr, bool showCodeButton = true}) {
     final home = (p['home'] ?? '').toString();
     final away = (p['away'] ?? '').toString();
     final league = (p['league'] ?? '').toString();
@@ -1043,6 +1115,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               ),
             ],
           ),
+          if (!showCodeButton) const SizedBox.shrink() else ...[
           const SizedBox(height: 6),
           if (codeState?.code != null)
             Row(
@@ -1111,6 +1184,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                 ),
               ),
             ),
+          ],
         ],
       ),
     );
@@ -1243,6 +1317,17 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
 }
 
 /// État de génération du code coupon d'une sélection.
+/// Résultat d'un appel à `generate-combined` : soit un combiné, soit une
+/// erreur — avec l'éventuel délai avant nouvelle tentative (1 code / minute).
+class _GenerateOutcome {
+  final Map<String, dynamic>? result;
+  final String? errorCode;
+  final String? error;
+  final int? retryAfter;
+
+  const _GenerateOutcome({this.result, this.errorCode, this.error, this.retryAfter});
+}
+
 class _PickCodeState {
   final String? code;
   final String? deepLink;

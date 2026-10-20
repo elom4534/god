@@ -7,6 +7,7 @@
  * → "https://megapari.com/en?coupon-code=X9A1B" → extraction couponCode
  */
 
+import * as crypto from 'crypto';
 import { Injectable, BadRequestException, InternalServerErrorException, Logger } from '@nestjs/common';
 import axios from 'axios';
 import { createClient } from 'redis';
@@ -175,12 +176,57 @@ export class MegaPariCouponService {
    */
   private static lastShareCall = 0;
 
-  private async throttleShareCall(): Promise<void> {
-    const minInterval = parseInt(process.env.MEGAPARI_MIN_INTERVAL_MS || '20000', 10);
+  /** File process-local : une seule création de coupon à la fois. */
+  private static shareQueue: Promise<unknown> = Promise.resolve();
+
+  private enqueueShare<T>(fn: () => Promise<T>): Promise<T> {
+    const run = MegaPariCouponService.shareQueue.then(fn, fn);
+    MegaPariCouponService.shareQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /**
+   * Réserve le prochain créneau de création de coupon auprès de BetB2B.
+   *
+   * Mesures du 20/10/2026 : la passerelle accepte environ **une création de
+   * coupon par minute** (une requête de 50 sélections passe très bien, deux
+   * requêtes rapprochées renvoient 400 « LiveBetService returned 200 »).
+   *
+   * On ne bloque JAMAIS la requête HTTP pour attendre le créneau : le proxy
+   * Alwaysdata coupe les réponses trop longues (~30 s) et l'utilisateur
+   * verrait une erreur réseau. Si le créneau est occupé, on renvoie
+   * immédiatement `B2B_RATE_LIMITED` + `retry_after_seconds` ; le client
+   * (Flutter) attend le délai indiqué puis relance automatiquement, ce qui
+   * garantit des réponses < 1 s dans tous les cas.
+   */
+  private async acquireShareSlot(): Promise<void> {
+    const interval = parseInt(process.env.MEGAPARI_SHARE_INTERVAL_MS || '65000', 10);
+    const redis = await getRedis();
+    const key = `bookmaker:share-slot:${this.provider}`;
     const now = Date.now();
-    const wait = MegaPariCouponService.lastShareCall + minInterval - now;
-    if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+    const last = redis
+      ? parseInt((await redis.get(key).catch(() => null)) || '0', 10)
+      : MegaPariCouponService.lastShareCall;
+    const wait = last + interval - now;
+
+    if (wait > 0) {
+      const sec = Math.max(1, Math.ceil(wait / 1000));
+      throw new BadRequestException({
+        error: 'B2B_COUPON_FAILED',
+        reason_code: 'B2B_RATE_LIMITED',
+        message: `MegaPari autorise un code coupon par minute : nouvelle tentative possible dans ${sec} s.`,
+        details: { retry_after_seconds: sec },
+      });
+    }
+    MegaPariCouponService.lastShareCall = now;
+    if (redis) await redis.set(key, String(now)).catch(() => undefined);
+  }
+
+  /** Invalide le créneau courant (la passerelle a refusé) → attente d'une minute. */
+  private async markShareRejected(): Promise<void> {
     MegaPariCouponService.lastShareCall = Date.now();
+    const redis = await getRedis();
+    if (redis) await redis.set(`bookmaker:share-slot:${this.provider}`, String(Date.now())).catch(() => undefined);
   }
 
   /** Clé de cache stable d'un coupon (même sélection + même cote → même code). */
@@ -205,22 +251,7 @@ export class MegaPariCouponService {
       }
     }
 
-    // Cooldown actif → on échoue vite avec un code dédié (l'UI affiche un
-    // message « réessaie dans un instant »). Évite de marteler la passerelle.
-    if (redis) {
-      const cooling = await redis.get(`bookmaker:cooldown:${this.provider}`).catch(() => null);
-      if (cooling) {
-        const ttl = await redis.ttl(`bookmaker:cooldown:${this.provider}`).catch(() => 60);
-        throw new BadRequestException({
-          error: 'B2B_COUPON_FAILED',
-          reason_code: 'B2B_RATE_LIMITED',
-          message: `MegaPari limite temporairement la création de codes coupon. Réessaie dans ${Math.max(1, ttl)} s.`,
-          details: { retry_after_seconds: Math.max(1, ttl) },
-        });
-      }
-    }
-
-    await this.throttleShareCall();
+    // Créneau réservé sans blocage (cf. acquireShareSlot).
     const token = await this.getAccessToken();
 
     // Extraction champs B2B — fallback depuis Pick si b2b_* nonfournis mais market_type connu
@@ -274,22 +305,20 @@ export class MegaPariCouponService {
       const res = await axios.get(url, {
         params,
         headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
-        timeout: 10000,
+        timeout: 15000,
       });
       resp = res.data;
     } catch (e: any) {
       const detail = e?.response?.data || e.message;
       const text = JSON.stringify(detail);
       // Message caractéristique d'une limitation de débit côté BetB2B.
-      const throttled = e?.response?.status === 400 && text.includes('LiveBetService');
-      if (throttled && redis) {
-        const cooldownSec = parseInt(process.env.MEGAPARI_COOLDOWN_SEC || '60', 10);
-        await redis.setEx(`bookmaker:cooldown:${this.provider}`, cooldownSec, '1').catch(() => undefined);
-        this.logger.warn(`[MEGAPARI B2B] limitation détectée — cooldown ${cooldownSec}s`);
+      if (e?.response?.status === 400 && text.includes('LiveBetService')) {
+        await this.markShareRejected();
+        const cooldownSec = parseInt(process.env.MEGAPARI_COOLDOWN_SEC || '65', 10);
         throw new BadRequestException({
           error: 'B2B_COUPON_FAILED',
           reason_code: 'B2B_RATE_LIMITED',
-          message: `MegaPari limite temporairement la création de codes coupon. Réessaie dans ${cooldownSec} s.`,
+          message: `MegaPari autorise un code coupon par minute : nouvelle tentative possible dans ${cooldownSec} s.`,
           details: { retry_after_seconds: cooldownSec },
         });
       }
@@ -336,6 +365,142 @@ export class MegaPariCouponService {
     }
 
     return { couponCode, deepLink, raw: rawUrl };
+  }
+
+  /**
+   * Génère UN SEUL code coupon pour un combiné (plusieurs sélections).
+   *
+   * Le endpoint `sharecoupon` est déclaré au singulier dans la doc, mais il
+   * accepte les paramètres répétés : `sportEventId=…&sportEventId=…`,
+   * `type=…&type=…`, `oddsMarket=…&oddsMarket=…`, `parameter=…&parameter=…`.
+   * Confirmé par le manager MegaPari (20/10/2026) : la création d'un code
+   * coupon combiné est autorisée. On construit donc la requête à la main pour
+   * envoyer chaque sélection (les sérialiseurs type axios produiraient
+   * `sportEventId[]=`, que la passerelle n'attend pas).
+   */
+  async shareCouponCombined(
+    picks: Pick[],
+    options?: { language?: string },
+  ): Promise<{ couponCode: string; deepLink: string; raw: string; submitted: number }> {
+    if (!picks.length) throw new BadRequestException({ error: 'B2B_COUPON_FAILED', reason_code: 'NO_PICKS', message: 'Aucune sélection' });
+
+    const c = this.cfg;
+    const lng = options?.language || picks[0].b2b_lng || 'en';
+
+    // Clé de cache : toutes les sélections (ordre stable) → même code réutilisé.
+    const signature = picks
+      .map(p => `${p.sportEventId ?? p.event_id}:${p.b2b_type}:${p.b2b_oddsMarket}:${p.b2b_parameter ?? ''}`)
+      .sort()
+      .join('|');
+    // ⚠️ Pas de base64 tronqué : la signature fait ~1 000 caractères pour 50
+    // sélections et les 90 premiers caractères encodés ne couvrent que le début
+    // de la liste → deux combinés distincts partageaient le même code coupon
+    // (observé le 20/10/2026). On hache la signature entière.
+    const digest = crypto.createHash('sha1').update(`${c.ref}|${signature}`).digest('hex');
+    const cacheKey = `bookmaker:combo:${this.provider}:${c.ref}:${digest}`;
+
+    const redis = await getRedis();
+    if (redis) {
+      const cached = await redis.get(cacheKey).catch(() => null);
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (parsed?.couponCode) {
+            return { couponCode: parsed.couponCode, deepLink: parsed.deepLink, raw: parsed.deepLink, submitted: picks.length };
+          }
+        } catch { /* cache illisible → on regénère */ }
+      }
+    }
+
+    await this.acquireShareSlot();
+    const token = await this.getAccessToken();
+
+    const qs = new URLSearchParams();
+    qs.append('ref', String(c.ref));
+    for (const p of picks) {
+      const sportEventId = p.sportEventId ?? parseInt(p.event_id, 10);
+      const oddsMarket = p.b2b_oddsMarket;
+      const type = p.b2b_type;
+      if (!sportEventId || isNaN(sportEventId) || !oddsMarket || !type) {
+        throw new BadRequestException({
+          error: 'MISSING_B2B_FIELD',
+          reason_code: 'MISSING_B2B_FIELD',
+          message: `Sélection incomplète pour le B2B (event ${p.event_id})`,
+        });
+      }
+      qs.append('sportEventId', String(sportEventId));
+      qs.append('type', String(type));
+      qs.append('oddsMarket', String(oddsMarket));
+      if (p.b2b_parameter !== undefined && p.b2b_parameter !== null) {
+        qs.append('parameter', String(p.b2b_parameter));
+      }
+    }
+    qs.append('kind', '3'); // 3 = prematch (line)
+    qs.append('lng', lng);
+    if (process.env.MEGAPARI_PARTNER_LINK) qs.append('partnerLink', process.env.MEGAPARI_PARTNER_LINK);
+
+    const url = `${this.gatewayBase}/datafeed/directories/api/v1/sharecoupon?${qs.toString()}`;
+    this.logger.log(`[MEGAPARI B2B] sharecoupon combiné — ${picks.length} sélections`);
+
+    // La passerelle BetB2B tolère environ **1 création de coupon par minute**.
+    // Au-delà, elle répond 400 « LiveBetService returned 200 ». On réessaie donc
+    // automatiquement (2 tentatives espacées) avant de signaler une limite.
+    // Vérifié le 20/10/2026 : un coupon de 50 sélections passe bien en un appel.
+    let rawUrl = '';
+    let lastText = '';
+    try {
+      const res = await axios.get(url, {
+        headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
+        timeout: 20000,
+      });
+      const resp = res.data;
+      rawUrl = typeof resp === 'string' ? resp : (resp?.deeplink || resp?.url || JSON.stringify(resp));
+    } catch (e: any) {
+      lastText = JSON.stringify(e?.response?.data ?? e?.message);
+      const rateLimited = e?.response?.status === 400 && lastText.includes('LiveBetService');
+      if (rateLimited) {
+        // La passerelle vient de refuser : on repousse le créneau d'une minute
+        // et on laisse le client relancer automatiquement.
+        await this.markShareRejected();
+        const cooldownSec = parseInt(process.env.MEGAPARI_COOLDOWN_SEC || '65', 10);
+        this.logger.warn(`[MEGAPARI B2B] création refusée par la passerelle — créneau repoussé de ${cooldownSec} s`);
+        throw new BadRequestException({
+          error: 'B2B_COUPON_FAILED',
+          reason_code: 'B2B_RATE_LIMITED',
+          message: `MegaPari autorise un code coupon par minute : nouvelle tentative possible dans ${cooldownSec} s.`,
+          details: { retry_after_seconds: cooldownSec },
+        });
+      }
+      throw new InternalServerErrorException({
+        error: 'B2B_COUPON_FAILED',
+        reason_code: 'B2B_SHARECOUPON_ERROR',
+        message: `Échec création du coupon combiné MegaPari: ${lastText.slice(0, 500)}`,
+        details: { selections: picks.length },
+      });
+    }
+
+    if (typeof rawUrl !== 'string' || !rawUrl.includes('coupon-code=')) {
+      throw new InternalServerErrorException({
+        error: 'B2B_COUPON_FAILED',
+        reason_code: 'B2B_INVALID_COUPON_RESPONSE',
+        message: `Réponse B2B invalide (pas de coupon-code): ${String(rawUrl).slice(0, 300)}`,
+      });
+    }
+
+    const match = rawUrl.match(/coupon-code=([A-Z0-9]+)/i);
+    if (!match) {
+      throw new InternalServerErrorException({ error: 'B2B_COUPON_FAILED', reason_code: 'B2B_COUPON_CODE_NOT_FOUND', details: rawUrl });
+    }
+    const couponCode = match[1].toUpperCase();
+    const deepLink = rawUrl.replace(/^"|"$/g, '');
+
+    if (redis) {
+      await redis.setEx(cacheKey, 900, JSON.stringify({ couponCode, deepLink, selections: picks.length })).catch(() => undefined);
+    }
+
+    this.logger.log(`[MEGAPARI B2B] coupon combiné ${couponCode} (${picks.length} sélections)`);
+
+    return { couponCode, deepLink, raw: rawUrl, submitted: picks.length };
   }
 
   // --- Génération coupon + B2B ---
