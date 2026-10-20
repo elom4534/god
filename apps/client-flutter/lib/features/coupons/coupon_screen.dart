@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'custom_coupon_screen.dart';
 import '../../widgets/responsible_gambling_banner.dart';
 
 class CouponScreen extends StatefulWidget {
@@ -108,6 +109,12 @@ class _CouponScreenState extends State<CouponScreen> {
                       SizedBox(height:12),
                       FilledButton.icon(onPressed: place, icon: Icon(Icons.send), label: Text(isFr ? 'Placer via 1xBet / Méga Pari (revalidation marge ≤5%)' : 'Place via 1xBet / Méga Pari (revalidate margin ≤5%)')),
                       Text(isFr ? 'Revalidation fail-closed juste avant envoi — si marge >5% → rejet automatique.' : 'Fail-closed revalidation just before sending — if margin >5% → auto-reject.', style: TextStyle(fontSize:10, color:Colors.grey)),
+            SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CustomCouponScreen())),
+              icon: Icon(Icons.auto_awesome),
+              label: Text(isFr ? 'Combiné sur mesure (nombre de matchs + côte cible)' : 'Custom accumulator (matches + target odds)'),
+            ),
                     ],
                   ),
                 ),

@@ -306,6 +306,9 @@ def group_selections_into_markets(
             "odds_internal": odds,
             "tags": list(spec["tags"]),
             "_betb2b_type": type_id,
+            # Paramètre BRUT signé de BetB2B (ex: -1.5 / +1.5 en handicap) :
+            # indispensable pour reconstruire le lien coupon (sharecoupon.parameter).
+            "_betb2b_parameter": parameter,
             "_is_center": bool(sel.get("isCenter")),
         })
         bucket["_betb2b_types"].append(type_id)

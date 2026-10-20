@@ -2,11 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'core/theme/app_theme.dart';
 import 'features/home/home_screen.dart';
-import 'features/coupons/coupon_screen.dart';
-import 'features/picks/pick_detail_screen.dart';
+import 'features/coupons/custom_coupon_screen.dart';
 import 'features/history/history_screen.dart';
 import 'features/settings/settings_screen.dart';
-import 'widgets/responsible_gambling_banner.dart';
 
 void main() {
   runApp(const PredApp());
@@ -28,7 +26,7 @@ class _PredAppState extends State<PredApp> {
   Widget build(BuildContext context) {
     final screens = [
       HomeScreen(onLocaleChange: setLocale),
-      const CouponScreen(),
+      const CustomCouponScreen(),
       const HistoryScreen(),
       SettingsScreen(currentLocale: _locale, onLocaleChange: setLocale),
     ];
@@ -44,7 +42,8 @@ class _PredAppState extends State<PredApp> {
         GlobalCupertinoLocalizations.delegate,
       ],
       home: Scaffold(
-        body: screens[_nav],
+        // IndexedStack : conserve l'état du formulaire quand on change d'onglet
+        body: IndexedStack(index: _nav, children: screens),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _nav,
           onDestinationSelected: (i) => setState(() => _nav = i),

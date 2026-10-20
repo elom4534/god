@@ -286,7 +286,15 @@ async def process_and_cache_event(
                 "line": m.get("line"),
                 "margin_percent": margin,
                 "selections": [
-                    {"selection_id": s["selection_id"], "name": s["name"], "tags": s.get("tags", [])}
+                    {
+                        "selection_id": s["selection_id"],
+                        "name": s["name"],
+                        "tags": s.get("tags", []),
+                        # Taxonomie BetB2B exacte (issue du flux LoadSingle) — sert au
+                        # lien coupon sharecoupon (type + parameter signé).
+                        "b2b_type": s.get("_betb2b_type"),
+                        "b2b_parameter": s.get("_betb2b_parameter"),
+                    }
                     # odds intentionnellement omises — stockées interne uniquement
                     for s in valid_sels
                 ],
@@ -299,11 +307,26 @@ async def process_and_cache_event(
 
     # 3. Cache Redis 15min — clé = megapari:event:{event_id}
     as_of = datetime.now(timezone.utc).isoformat()
+    # Métadonnées d'affichage (noms, logos, ligue, coup d'envoi) — nécessaires
+    # au générateur de combiné pour présenter des libellés lisibles côté client.
+    try:
+        from app.services.esports_pipeline import extract_event_meta
+        meta = extract_event_meta(raw_event)
+    except Exception:
+        meta = {"home_team": "", "away_team": "", "league": "", "start_time": None,
+                "sport": "football", "home_logo_url": "", "away_logo_url": ""}
     cache_payload = {
         "event_id": event_id,
         "provider": provider,
         "validated_markets": validated,
         "rejected": rejected,
+        "home_team": meta.get("home_team", ""),
+        "away_team": meta.get("away_team", ""),
+        "home_logo_url": meta.get("home_logo_url", ""),
+        "away_logo_url": meta.get("away_logo_url", ""),
+        "league": meta.get("league", ""),
+        "sport": meta.get("sport", "football"),
+        "start_time": meta.get("start_time"),
         "as_of": as_of,
         "model_version": "v0.3.0",
     }
