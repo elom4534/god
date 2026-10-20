@@ -18,6 +18,10 @@ export class BookmakerController {
   @UseGuards(CountryPolicyGuard)
   async createCoupon(@Body() body: any, @Headers('x-country-code') country: string) {
     const { draft_id, provider, stake, currency } = body;
+    // MegaPari uniquement (1xBet en attente)
+    if (provider !== 'Méga Pari' && provider !== 'MEGAPARI') {
+      throw new HttpException({ error: 'PROVIDER_NOT_SUPPORTED', reason_code: 'PROVIDER_NOT_SUPPORTED', details: 'Seul MegaPari est actif' }, HttpStatus.BAD_REQUEST);
+    }
     if (!draft_id || !provider || !stake) {
       throw new HttpException({ error: 'MISSING_FIELDS', reason_code: 'MISSING_FIELDS' }, HttpStatus.BAD_REQUEST);
     }

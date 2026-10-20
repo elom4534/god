@@ -191,7 +191,8 @@ def extract_markets_from_megapari(raw_event: Dict[str, Any]) -> List[Dict[str, A
 async def process_and_cache_event(
     raw_event: Dict[str, Any],
     provider: str = PROVIDER,
-    threshold: float = MARGIN_THRESHOLD
+    threshold: float = MARGIN_THRESHOLD,
+    cache: bool = True,
 ) -> Dict[str, Any]:
     """
     Traite 1 event MegaPari:
@@ -307,18 +308,19 @@ async def process_and_cache_event(
         "model_version": "v0.3.0",
     }
 
-    # On stocke en Redis (TTL 15min) — pour Selection Engine + pré-calcul picks
-    try:
-        r = await get_redis()
-        redis_key = f"megapari:event:{event_id}"
-        await r.setex(redis_key, REDIS_TTL_SECONDS, json.dumps(cache_payload, ensure_ascii=False))
-        # Aussi index par start_time pour requêtes rapides (zset)
-        start_time = raw_event.get("start_time") or raw_event.get("startDate")
-        if start_time:
-            await r.zadd("megapari:events:by_time", {event_id: float(start_time) if isinstance(start_time, (int, float)) else 0})
-    except Exception as e:
-        # Redis down → Fail-Closed: on log mais on retourne quand même le payload (pas de cache)
-        print(f"[MEGAPARI CACHE ERROR] {e} — fallback sans Redis")
+    # On stocke en Redis (TTL 15min) — pour Selection Engine + pré-calcul picks (si cache=True)
+    if cache:
+        try:
+            r = await get_redis()
+            redis_key = f"megapari:event:{event_id}"
+            await r.setex(redis_key, REDIS_TTL_SECONDS, json.dumps(cache_payload, ensure_ascii=False))
+            # Aussi index par start_time pour requêtes rapides (zset)
+            start_time = raw_event.get("start_time") or raw_event.get("startDate")
+            if start_time:
+                await r.zadd("megapari:events:by_time", {event_id: float(start_time) if isinstance(start_time, (int, float)) else 0})
+        except Exception as e:
+            # Redis down → Fail-Closed: on log mais on retourne quand même le payload (pas de cache)
+            print(f"[MEGAPARI CACHE ERROR] {e} — fallback sans Redis")
 
     # 4. Payload nettoyé — SANS cotes (prêt Selection Engine)
     # On retire _odds_internal avant envoi client, mais on le garde pour PG si besoin

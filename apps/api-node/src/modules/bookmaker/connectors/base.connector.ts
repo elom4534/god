@@ -51,18 +51,19 @@ export class BaseBetB2BConnector {
   async getAccessToken(): Promise<string> {
     const c = this.cfg;
     if (!c.client_id || !c.client_secret) throw new Error(`[${c.name}] client_id/client_secret manquants`);
+    const clientSecret = c.client_secret.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
     const cacheKey = `bookmaker:token:${c.name}:${c.ref}:${c.client_id.slice(-6)}`;
     const r = await getRedis();
     if (r) { const cached = await r.get(cacheKey).catch(()=>null); if (cached) return cached; }
 
     const { data } = await axios.post(TOKEN_URL,
-      new URLSearchParams({ client_id: c.client_id, client_secret: c.client_secret }).toString(),
+      new URLSearchParams({ client_id: c.client_id, client_secret: clientSecret }).toString(),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 8000 }
     );
     const token = data.access_token;
     const exp = data.expires_in || 3600;
     if (!token) throw new Error(`[${c.name}] pas de token`);
-    if (r) await r.setEx(cacheKey, token, { EX: Math.max(60, exp - 60) });
+    if (r) await r.setEx(cacheKey, Math.max(60, exp - 60), token);
     return token;
   }
 
