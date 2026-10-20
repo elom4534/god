@@ -1,0 +1,31 @@
+[
+  {
+    "id": "evt_pl_001",
+    "provider": "1xBet",
+    "home": "Arsenal",
+    "away": "Manchester City",
+    "league": "Premier League",
+    "start_time": "2026-10-21T19:45:00Z",
+    "markets": [
+      { "id": "m_1x2", "name": "1X2", "odds": [2.40, 3.20, 3.10], "status": "active" },
+      { "id": "m_ou25", "name": "Over/Under 2.5", "line": 2.5, "selections": [{"name":"Over","odds":"1,95"},{"name":"Under","odds":"1,85"}] },
+      { "id": "m_btts", "name": "Both Teams to Score", "selections": [{"name":"Yes","odds":1.92},{"name":"No","odds":1.92}] },
+      { "id": "m_dc", "name": "Double Chance", "selections": [{"name":"1X","odds":1.30},{"name":"X2","odds":1.45},{"name":"12","odds":1.35}] }
+    ]
+  },
+  {
+    "id": "virt_001",
+    "provider": "Méga Pari",
+    "is_virtual": true,
+    "home": "Virt Team A",
+    "away": "Virt Team B",
+    "league": "Virtual Liga",
+    "start_time": "2026-10-21T20:00:00Z",
+    "snapshot_ts": "2026-10-19T20:00:00Z",
+    "markets": [
+      { "id": "m1", "name": "1X2", "odds": [2.10, 3.20, 3.50] },
+      { "id": "m2", "name": "Over 2.5", "line": 2.5, "selections": [{"name":"Over","odds":1.90},{"name":"Under","odds":1.90}] }
+    ],
+    "result": { "score": "2-1", "winner": "1" }
+  }
+]

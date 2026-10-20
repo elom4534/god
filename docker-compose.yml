@@ -1,0 +1,132 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: pred_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-preddb}
+      POSTGRES_USER: ${POSTGRES_USER:-preduser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-predpass}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pred_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: pred_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      retries: 3
+
+  api-node:
+    build:
+      context: ./apps/api-node
+      dockerfile: Dockerfile
+    container_name: pred_api_node
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-preduser}:${POSTGRES_PASSWORD:-predpass}@postgres:5432/${POSTGRES_DB:-preddb}
+      REDIS_URL: redis://redis:6379
+      ML_PYTHON_URL: http://ml-python:8000
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
+      BOOKMAKER_BASE_URL: ${BOOKMAKER_BASE_URL:-https://api.1xpartner.mock}
+      BOOKMAKER_API_KEY: ${BOOKMAKER_API_KEY:-mock_key}
+      LIVE_FOOTBALL_API_KEY: ${LIVE_FOOTBALL_API_KEY:-mock_live_key}
+      MINIO_ENDPOINT: minio
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ml-python:
+        condition: service_healthy
+    volumes:
+      - ./apps/api-node:/app
+      - /app/node_modules
+    command: npm run start:dev
+
+  ml-python:
+    build:
+      context: ./apps/ml-python
+      dockerfile: Dockerfile
+    container_name: pred_ml_python
+    environment:
+      PORT: 8000
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-preduser}:${POSTGRES_PASSWORD:-predpass}@postgres:5432/${POSTGRES_DB:-preddb}
+      REDIS_URL: redis://redis:6379
+      LIVE_FOOTBALL_API_KEY: ${LIVE_FOOTBALL_API_KEY:-mock_live_key}
+      MODEL_STORE_PATH: /opt/models
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps/ml-python:/app
+      - ml_models:/opt/models
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  pipelines:
+    build:
+      context: ./pipelines
+      dockerfile: Dockerfile
+    container_name: pred_pipelines
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-preduser}:${POSTGRES_PASSWORD:-predpass}@postgres:5432/${POSTGRES_DB:-preddb}
+      REDIS_URL: redis://redis:6379
+      LIVE_FOOTBALL_API_KEY: ${LIVE_FOOTBALL_API_KEY:-mock_live_key}
+      BOOKMAKER_API_KEY: ${BOOKMAKER_API_KEY:-mock_key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./pipelines:/app
+    command: python -m jobs.scheduler
+    restart: on-failure
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  ml_models:

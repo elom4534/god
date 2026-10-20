@@ -1,0 +1,31 @@
+name: pred_client
+description: "App prédiction sportive — sans cotes, probas calibrées, fail-closed"
+publish_to: "none"
+version: 0.3.0+1
+
+environment:
+  sdk: ">=3.2.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  http: ^1.2.0
+  provider: ^6.1.2
+  shared_preferences: ^2.2.2
+  intl: ^0.19.0
+  fl_chart: ^0.68.0
+  go_router: ^14.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.3
+  flutter_gen: ^5.6.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+  generate: true

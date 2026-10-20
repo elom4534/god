@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "policy": "fail_closed",
+  "allowed_countries": ["CI","CM","FR","BE","MA","SN","TG","BJ","ML","BF","NE","GN","GA","CG","CD","RW","KE","NG","GH","ZA"],
+  "blocked_countries": ["US","GB","DE","AU"],
+  "default_behavior": "BLOCK_CREATE_BUT_SHOW_PROBAS",
+  "notes": "Si pays absent de allowed et blocked → BLOCK (fail-closed). Config via env ALLOWED_COUNTRIES."
+}
