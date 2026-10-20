@@ -57,6 +57,11 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
 
   /// Compteurs pour la discipline sélectionnée.
   int? _availableEvents;
+  // Fenêtre « aujourd'hui / demain » (source : GET /coupons/window, cotes live).
+  int? _todayEvents;
+  int? _tomorrowEvents;
+  /// Plafond imposé par la fenêtre « aujourd'hui + demain » (cotes live).
+  int? _windowMaxMatches;
   int _maxMatches = defaultMaxMatches;
   int? _availablePicks;
 
@@ -88,7 +93,39 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       Uri.parse('${AppConfig.effectiveApiBase}$path').replace(queryParameters: query);
 
   Future<void> _loadAll() async {
-    await Future.wait([_loadSports(), _loadAvailability()]);
+    await Future.wait([_loadSports(), _loadAvailability(), _loadWindow()]);
+  }
+
+  /// Nombre de matchs réellement composables aujourd'hui / demain.
+  /// Sert aussi de plafond au champ « Nombre de matchs ».
+  Future<void> _loadWindow() async {
+    try {
+      final res = await http
+          .get(
+            _uri('/coupons/window',
+                _selectedSportId != null ? {'sport_id': '$_selectedSportId'} : null),
+            headers: const {'Accept': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 40));
+      if (!mounted) return;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        final d = jsonDecode(res.body);
+        if (d is Map<String, dynamic>) {
+          setState(() {
+            _todayEvents = (d['today_events'] is num) ? (d['today_events'] as num).toInt() : null;
+            _tomorrowEvents = (d['tomorrow_events'] is num) ? (d['tomorrow_events'] as num).toInt() : null;
+            final max = (d['max_matches'] is num) ? (d['max_matches'] as num).toInt() : null;
+            if (max != null && max > 0) {
+              _windowMaxMatches = max;
+              _maxMatches = math.min(_maxMatches, max);
+            }
+            if (max != null) _availableEvents = max;
+          });
+        }
+      }
+    } catch (_) {
+      /* purement indicatif */
+    }
   }
 
   Future<void> _loadSports() async {
@@ -104,7 +141,11 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         setState(() {
           _sports = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
           final mm = decoded['max_matches'];
-          if (mm is num && mm > 0) _maxMatches = mm.toInt();
+          if (mm is num && mm > 0) {
+            _maxMatches = _windowMaxMatches == null
+                ? mm.toInt()
+                : math.min(mm.toInt(), _windowMaxMatches!);
+          }
           _loadingSports = false;
         });
         return;
@@ -147,8 +188,11 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       _pickCodes.clear();
       _availableEvents = null;
       _availablePicks = null;
+      _todayEvents = null;
+      _tomorrowEvents = null;
+      _windowMaxMatches = null;
     });
-    await _loadAvailability();
+    await Future.wait([_loadAvailability(), _loadWindow()]);
   }
 
   Future<void> _generate() async {
@@ -454,8 +498,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               const SizedBox(height: 16),
               Text(
                 isFr
-                    ? 'À chaque clic, les cotes sont relues EN DIRECT chez MegaPari (aucune cote en cache). Seules les sélections ayant au moins 70 % de chances de passer sont retenues, puis le moteur choisit celles qui rapprochent le combiné de ta côte cible. Jusqu\'à $_maxMatches matchs, un seul code coupon.'
-                    : 'On every click odds are fetched LIVE from MegaPari (nothing cached). Only selections with at least 70% chance of winning are kept, then the engine picks those that bring the accumulator closest to your target odds. Up to $_maxMatches matches, one single coupon code.',
+                    ? 'Cotes relues EN DIRECT chez MegaPari à chaque clic. Seules les sélections ayant au moins 70 % de chances de passer sont retenues. Les matchs sont obligatoirement ceux d\'aujourd\'hui ; si la sélection n\'est pas possible, le moteur complète avec demain — jamais au-delà. Un seul code coupon.'
+                    : 'Odds fetched LIVE from MegaPari on every click. Only selections with at least 70% chance of winning are kept. Matches are today\'s only; if the selection cannot be built, tomorrow is used — never beyond. One single coupon code.',
                 style: TextStyle(fontSize: 10.5, color: Colors.grey[600], height: 1.35),
                 textAlign: TextAlign.center,
               ),
@@ -477,6 +521,14 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       text = isFr ? 'Chargement des disciplines…' : 'Loading sports…';
       color = cs.primary;
       icon = Icons.hourglass_top;
+    } else if (_todayEvents != null || _tomorrowEvents != null) {
+      final t = _todayEvents ?? 0;
+      final m = _tomorrowEvents ?? 0;
+      text = isFr
+          ? '$t match(s) aujourd\'hui · $m demain — « $_selectedSportLabel » (cotes live, sélections ≥ 70 %)'
+          : '$t match(es) today · $m tomorrow — “$_selectedSportLabel” (live odds, picks ≥ 70%)';
+      color = (t + m) > 0 ? Colors.green : Colors.orange;
+      icon = (t + m) > 0 ? Icons.check_circle_outline : Icons.info_outline;
     } else if (_availableEvents != null) {
       if (_availableEvents == 0) {
         text = isFr
@@ -1078,6 +1130,21 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     final odds = (p['odds'] is num) ? (p['odds'] as num).toDouble() : null;
     final margin = (p['margin_percent'] is num) ? (p['margin_percent'] as num).toDouble() : null;
     final prob = (p['probability_percent'] is num) ? (p['probability_percent'] as num).toInt() : null;
+    final day = (p['day'] ?? '').toString();
+    final dayLabel = day == 'TODAY'
+        ? (isFr ? "Aujourd'hui" : 'Today')
+        : day == 'TOMORROW'
+            ? (isFr ? 'Demain' : 'Tomorrow')
+            : '';
+    String kickoff = '';
+    final rawStart = (p['start_time'] ?? '').toString();
+    if (rawStart.isNotEmpty) {
+      final dt = DateTime.tryParse(rawStart);
+      if (dt != null) {
+        final l = dt.toLocal();
+        kickoff = '${l.hour.toString().padLeft(2, '0')}:${l.minute.toString().padLeft(2, '0')}';
+      }
+    }
     final eventId = (p['event_id'] ?? '').toString();
     final selectionId = (p['selection_id'] ?? '').toString();
     final key = '$eventId|$selectionId';
@@ -1091,6 +1158,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         (selName.toLowerCase().startsWith(marketLabel.toLowerCase().split(' ').first) ||
             selName.toLowerCase().contains(marketLabel.toLowerCase()));
     final subtitleParts = <String>[
+      if (dayLabel.isNotEmpty) kickoff.isNotEmpty ? '$dayLabel $kickoff' : dayLabel,
       if (league.isNotEmpty) league,
       if (sportName.isNotEmpty) sportName,
       if (market.isNotEmpty && !redundantLabel) marketLabel,
@@ -1112,8 +1180,15 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               Container(
                 width: 28,
                 height: 28,
-                decoration: BoxDecoration(color: Colors.green.withOpacity(0.12), shape: BoxShape.circle),
-                child: const Icon(Icons.check, size: 15, color: Colors.green),
+                decoration: BoxDecoration(
+                  color: (day == 'TOMORROW' ? Colors.amber : Colors.green).withOpacity(0.14),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  day == 'TOMORROW' ? Icons.event : Icons.check,
+                  size: 15,
+                  color: day == 'TOMORROW' ? Colors.orange : Colors.green,
+                ),
               ),
               const SizedBox(width: 10),
               Expanded(

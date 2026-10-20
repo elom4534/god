@@ -3,6 +3,7 @@ import axios from 'axios';
 import { createClient } from 'redis';
 import { MegaPariCouponService, Pick } from '../bookmaker/megapari-coupon.service';
 import { buildLivePool } from './live-odds';
+import { classifyMatchDay, dayWindow, DayWindow, MatchDay } from './match-days';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -55,6 +56,10 @@ export interface ComposeOptions {
   pool?: ValuePick[];
   /** Provenance du pool, reportée dans la réponse. */
   source?: 'live' | 'cache';
+  /** Fenêtre de jours autorisée (calculée une seule fois par requête). */
+  window?: DayWindow;
+  /** Libellé de périmètre pour les messages (« aujourd'hui », « aujourd'hui et demain »). */
+  scopeLabel?: string;
 }
 
 /** Mapping tag de sélection → type BetB2B (oddsLocalization.type). */
@@ -94,6 +99,9 @@ function resolveB2bType(marketType: string, tags: string[], name: string): numbe
 @Injectable()
 export class CombinedCouponService {
   private readonly logger = new Logger(CombinedCouponService.name);
+
+  /** Micro-cache anti-rafale (10 s) du pool live, par discipline. */
+  private static burstCache = new Map<string, { at: number; value: any }>();
 
   /** Limite produit : 50 matchs maximum par combiné. */
   private readonly maxMatches = parseInt(process.env.MAX_COUPON_MATCHES || '50', 10);
@@ -210,7 +218,43 @@ export class CombinedCouponService {
   // ------------------------------------------------------------ live feed --
 
   /**
-   * Charge les marchés DIRECTEMENT chez MegaPari (BetB2B), à l'instant du clic.
+   * Résumé de la fenêtre « aujourd'hui / demain » pour l'écran de saisie.
+   * Coût : un appel bookmaker (mutualisé par le micro-cache de `loadLivePicks`).
+   */
+  async getWindowSummary(sportId?: number | null) {
+    const live = await this.loadLivePicks(sportId ?? null);
+    const window = dayWindow();
+    const now = Date.now();
+
+    const byDay = { TODAY: new Set<string>(), TOMORROW: new Set<string>() };
+    const picksByDay = { TODAY: 0, TOMORROW: 0 };
+    for (const p of live.picks) {
+      if (p.prob < this.minProbability) continue;
+      const day = classifyMatchDay(p.start_time, window, now);
+      if (day === 'TODAY' || day === 'TOMORROW') {
+        byDay[day].add(p.event_id);
+        picksByDay[day] += 1;
+      }
+    }
+
+    const todayEvents = byDay.TODAY.size;
+    const tomorrowEvents = byDay.TOMORROW.size;
+
+    return {
+      timezone: window.timeZone,
+      as_of: live.asOf,
+      min_probability: Math.round(this.minProbability * 100),
+      today_events: todayEvents,
+      tomorrow_events: tomorrowEvents,
+      // Plafond de matchs réellement composables dans la fenêtre.
+      max_matches: Math.min(this.maxMatches, todayEvents + tomorrowEvents),
+      picks: picksByDay,
+      events_fetched: live.eventsFetched,
+      validated_markets: live.validatedMarkets,
+    };
+  }
+
+  /** Charge les marchés DIRECTEMENT chez MegaPari (BetB2B), à l'instant du clic.
    *
    * Aucune lecture du cache métier : une cote peut bouger en quelques secondes,
    * et générer un code coupon sur des cotes périmées n'a aucun sens. Le flux
@@ -223,6 +267,13 @@ export class CombinedCouponService {
     eventsFetched: number;
     validatedMarkets: number;
   }> {
+    // Anti-rafale (10 s) : l'écran de saisie et le clic « Générer » ne doivent
+    // pas déclencher deux appels bookmaker, sans pour autant servir une cote
+    // périmée. Ce n'est PAS le cache métier de l'ETL.
+    const burstKey = String(sportId ?? 'all');
+    const cached = CombinedCouponService.burstCache.get(burstKey);
+    if (cached && Date.now() - cached.at < 10_000) return cached.value;
+
     // Pool plus large que le nombre de matchs demandé : la contrainte de
     // probabilité élimine beaucoup de matchs, il faut donc du choix.
     const events = await this.mega.fetchPrematchEvents(limit, sportId ?? null);
@@ -270,12 +321,14 @@ export class CombinedCouponService {
       }
     }
 
-    return {
+    const result = {
       picks,
       asOf: new Date().toISOString(),
       eventsFetched: pool.eventsFetched,
       validatedMarkets: pool.validatedMarkets,
     };
+    CombinedCouponService.burstCache.set(burstKey, { at: Date.now(), value: result });
+    return result;
   }
 
   /** Sports réels proposés par le bookmaker, avec le nombre de matchs disponibles. */
@@ -351,7 +404,109 @@ export class CombinedCouponService {
    *      remplacement qui minimise l'écart final.
    *   4. On répète jusqu'à stabilité (ou exactitude atteinte).
    */
+  /**
+   * Compose un combiné en respectant la fenêtre « aujourd'hui → demain ».
+   *
+   * Stratégie : on essaie d'abord avec les matchs du JOUR uniquement. Si le
+   * nombre de matchs ou la cote visée n'est pas atteignable, on élargit à
+   * DEMAIN. Jamais au-delà : un match de la semaine prochaine n'a rien à faire
+   * dans un combiné « du jour ».
+   */
   async compose(
+    numMatches: number,
+    targetTotalOdds: number,
+    options: ComposeOptions = {},
+  ) {
+    const window = options.window ?? dayWindow();
+    const now = Date.now();
+    const withDay = <T extends { start_time: string | null }>(list: T[]) =>
+      list.map(p => ({ p, day: classifyMatchDay(p.start_time, window, now) }));
+
+    const all = withDay(options.pool ?? []);
+    const today = all.filter(x => x.day === 'TODAY').map(x => x.p);
+    const tomorrow = all.filter(x => x.day === 'TOMORROW').map(x => x.p);
+
+    const todayEvents = new Set(today.map(p => p.event_id)).size;
+    const tomorrowEvents = new Set(tomorrow.map(p => p.event_id)).size;
+
+    const scopeInfo = {
+      window: window.timeZone,
+      today_events: todayEvents,
+      tomorrow_events: tomorrowEvents,
+      today_start: new Date(window.todayStart).toISOString(),
+      tomorrow_start: new Date(window.tomorrowStart).toISOString(),
+    };
+
+    // 1er essai : aujourd'hui seulement.
+    let composed: Awaited<ReturnType<CombinedCouponService['composeCore']>> | null = null;
+    let firstError: any = null;
+    if (today.length > 0) {
+      try {
+        composed = await this.composeCore(numMatches, targetTotalOdds, { ...options, pool: today, scopeLabel: "aujourd'hui" });
+      } catch (e) {
+        firstError = e;
+      }
+    }
+
+    // 2e essai : aujourd'hui + demain (uniquement si demain apporte des matchs).
+    let secondError: any = null;
+    if (!composed && tomorrow.length > 0) {
+      try {
+        composed = await this.composeCore(numMatches, targetTotalOdds, {
+          ...options,
+          pool: [...today, ...tomorrow],
+          scopeLabel: "aujourd'hui et demain",
+        });
+        composed.dayScope = 'TODAY_TOMORROW';
+      } catch (e) {
+        secondError = e;
+      }
+    } else if (composed) {
+      composed.dayScope = 'TODAY';
+    }
+
+    if (!composed) {
+      // Aucun match aujourd'hui ET aucun demain : on explique précisément.
+      if (today.length === 0 && tomorrow.length === 0) {
+        throw new BadRequestException({
+          error: 'NO_MATCH_IN_WINDOW',
+          reason_code: 'NO_MATCH_TODAY_OR_TOMORROW',
+          message:
+            'Aucun match disponible aujourd\'hui ni demain pour cette sélection. ' +
+            'Choisis une autre discipline ou réessaie plus tard.',
+          details: scopeInfo,
+        });
+      }
+      // On relaie l'erreur la plus informative (celle du périmètre le plus large)
+      // en y ajoutant le nombre de matchs réellement disponibles par jour.
+      // L'erreur du périmètre le plus large est la plus utile à l'utilisateur.
+      const err: any = secondError ?? firstError ?? new BadRequestException({
+        error: 'COMPOSE_FAILED',
+        reason_code: 'COMPOSE_FAILED',
+        message: 'Impossible de composer un combiné avec les matchs du jour et de demain.',
+      });
+      const body = typeof err?.getResponse === 'function' ? err.getResponse() : null;
+      if (body && typeof body === 'object') {
+        throw new BadRequestException({
+          ...body,
+          details: { ...scopeInfo, ...(body.details ?? {}) },
+        });
+      }
+      throw err;
+    }
+
+    // Traçabilité jour par jour
+    const summary = { today: 0, tomorrow: 0 };
+    for (const p of composed.picks) {
+      if (classifyMatchDay(p.start_time, window, now) === 'TODAY') summary.today += 1;
+      else summary.tomorrow += 1;
+    }
+
+    return { ...composed, ...scopeInfo, daySummary: summary };
+  }
+
+  /** Cœur de l'algorithme — pool déjà filtré (jour + probabilité + marge). */
+  private async composeCore(
     numMatches: number,
     targetTotalOdds: number,
     options: ComposeOptions = {},
@@ -362,9 +517,11 @@ export class CombinedCouponService {
     gapPercent: number;
     exact: boolean;
     candidatesEvaluated: number;
+    dayScope?: 'TODAY' | 'TODAY_TOMORROW';
   }> {
     const n = Number(numMatches);
     const target = Number(targetTotalOdds);
+    const scopeLabel = options.scopeLabel ?? "aujourd'hui et demain";
 
     if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
       throw new BadRequestException({
@@ -395,7 +552,7 @@ export class CombinedCouponService {
       Math.max(0.01, options.minProbability ?? this.minProbability),
     );
 
-    const rawPool = options.pool ?? (await this.loadLivePicks(options.sportId ?? null)).picks;
+    const rawPool = options.pool ?? [];
     if (rawPool.length === 0) {
       throw new BadRequestException({
         error: 'NO_VALUE_PICKS',
@@ -435,7 +592,7 @@ export class CombinedCouponService {
       throw new BadRequestException({
         error: 'NOT_ENOUGH_EVENTS',
         reason_code: 'NOT_ENOUGH_EVENTS',
-        message: `Seulement ${events.length} match(s) disponible(s) pour cette sélection : réduis le nombre de matchs ou choisis « Tous les sports ».`,
+        message: `Seulement ${events.length} match(s) disponible(s) ${scopeLabel} : réduis le nombre de matchs ou choisis « Tous les sports ».`,
         details: { available: events.length, requested: n },
       });
     }
@@ -466,8 +623,8 @@ export class CombinedCouponService {
         reason_code: 'TARGET_UNREACHABLE_AT_MIN_PROBABILITY',
         message:
           `Avec ${Math.round(minProb * 100)} % de chances minimum par sélection, ` +
-          `${n} matchs plafonnent à une cote de ${maxReachable.toFixed(2)}. ` +
-          `Augmente le nombre de matchs à ${needed} (ou plus) pour viser ${target}.`,
+          `les matchs disponibles ${scopeLabel} plafonnent à une cote de ${maxReachable.toFixed(2)} ` +
+          `pour ${n} match(s). Augmente le nombre de matchs à ${needed} (ou plus) pour viser ${target}.`,
         details: {
           min_probability: Math.round(minProb * 100),
           requested_matches: n,
@@ -637,16 +794,21 @@ export class CombinedCouponService {
     // 1) Cotes de dernière minute : un SEUL appel bookmaker, réutilisé pour
     //    la composition ET pour le contrôle de cohérence des seuils.
     const live = await this.loadLivePicks(sportId ?? null);
+    const window = dayWindow();
     const composed = await this.compose(numMatches, targetTotalOdds, {
       sportId,
       pool: live.picks,
       minProbability,
       source: 'live',
+      window,
     });
     const picks = composed.picks;
     const minProb = Math.min(0.99, Math.max(0.01, minProbability ?? this.minProbability));
 
-    const label = `Combiné ${picks.length} matchs - Côte ${composed.totalOdds.toFixed(2)}`;
+    const dayLabel = composed.dayScope === 'TODAY'
+      ? "aujourd'hui"
+      : `${composed.daySummary.today} aujourd'hui + ${composed.daySummary.tomorrow} demain`;
+    const label = `Combiné ${picks.length} matchs (${dayLabel}) - Côte ${composed.totalOdds.toFixed(2)}`;
     const sports = [...new Set(picks.map(p => p.sport_name).filter(Boolean))];
 
     const b2bPicks: Pick[] = picks.map(p => ({
@@ -790,6 +952,8 @@ export class CombinedCouponService {
       source: 'live',
       oddsAsOf: live.asOf,
       minProbability: Math.round(minProb * 100),
+      dayScope: composed.dayScope,
+      daySummary: composed.daySummary,
     }));
 
     return {
@@ -813,6 +977,12 @@ export class CombinedCouponService {
       odds_as_of: live.asOf,
       min_probability: Math.round(minProb * 100),
       events_fetched: live.eventsFetched,
+      // Fenêtre « aujourd'hui → demain » (jamais au-delà).
+      day_scope: composed.dayScope,
+      day_summary: composed.daySummary,
+      today_events: composed.today_events,
+      tomorrow_events: composed.tomorrow_events,
+      timezone: composed.window,
       coupons,
       picks: picks.map(p => ({
         event_id: p.event_id,
@@ -832,6 +1002,8 @@ export class CombinedCouponService {
         margin_percent: p.margin_percent,
         // Probabilité « fair » de passer (marge retirée) — arrondie à l'unité.
         probability_percent: Math.round(p.prob * 100),
+        // Aujourd'hui ou demain (jamais après).
+        day: classifyMatchDay(p.start_time, window, Date.now()),
       })),
     };
   }

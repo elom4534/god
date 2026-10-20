@@ -36,6 +36,16 @@ export class CombinedCouponController {
     return this.svc.getSports(language || 'en');
   }
 
+  /**
+   * Fenêtre « aujourd'hui / demain » : nombre de matchs réellement composables
+   * par jour, avec le seuil de probabilité appliqué. Sert à borner le
+   * formulaire et à expliquer pourquoi une cible est inatteignable.
+   */
+  @Get('window')
+  async window(@Query('sport_id') sportId?: string) {
+    return this.svc.getWindowSummary(toSportId(sportId));
+  }
+
   /** Disponibilité du pool — borne le formulaire sans imposer de limite produit. */
   @Get('value-picks/availability')
   async availability(@Query('sport_id') sportId?: string) {

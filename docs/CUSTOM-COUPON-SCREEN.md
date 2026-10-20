@@ -17,8 +17,61 @@ Backend : `apps/api-node/src/modules/coupons/` (NestJS) + ETL `pipelines/etl/ing
 | Code coupon | **UN SEUL code pour tout le combiné** (`couponMode: "COMBO"`) |
 | Source des cotes | **LIVE** : relues chez MegaPari à chaque clic (aucun cache métier) |
 | Seuil de sécurité | chaque sélection doit avoir **≥ 70 %** de chances de passer (`COUPON_MIN_PROBABILITY`) |
+| Jours autorisés | **aujourd'hui** en priorité, **demain** en complément — jamais au-delà (`COUPON_TIMEZONE`, défaut `Africa/Lome`) |
 
 Le moteur ne fabrique jamais de cote : il choisit parmi les cotes réellement proposées.
+
+---
+
+## 1 ter. Fenêtre temporelle : aujourd'hui → demain, jamais plus
+
+Un combiné ne contient que des matchs qui se jouent **aujourd'hui**. Si le
+nombre de matchs ou la côte visée n'est pas atteignable, le moteur **élargit à
+demain**. Il ne va jamais au-delà.
+
+```
+compose(N, cible)
+  ├─ tentative 1 : matchs d'AUJOURD'HUI uniquement      → day_scope "TODAY"
+  └─ si échec    : matchs d'AUJOURD'HUI + DEMAIN         → day_scope "TODAY_TOMORROW"
+                   (et jamais au-delà de demain)
+```
+
+- Le jour est calculé dans le **fuseau de l'utilisateur** (`COUPON_TIMEZONE`,
+  défaut `Africa/Lome`), pas dans celui du serveur : un match à 00:30 reste
+  « aujourd'hui » même si le serveur est encore la veille.
+- Un match **déjà commencé** (plus de 10 min) est exclu, même s'il traîne
+  encore dans le flux prematch.
+- Réponse : `day_scope`, `day_summary {today, tomorrow}`, `today_events`,
+  `tomorrow_events`, `timezone` et `day` (`TODAY` / `TOMORROW`) sur chaque
+  sélection. Le libellé devient
+  `Combiné 8 matchs (5 aujourd'hui + 3 demain) - Côte 7.99`.
+- Si la fenêtre ne fournit aucun match : `NO_MATCH_TODAY_OR_TOMORROW`.
+
+### `GET /api/v1/coupons/window`
+Bornes réelles du formulaire (cotes live + seuil 70 %) :
+
+```json
+{
+  "timezone": "Africa/Lome",
+  "as_of": "2026-10-20T22:54:17.193Z",
+  "min_probability": 70,
+  "today_events": 5,
+  "tomorrow_events": 10,
+  "max_matches": 15,
+  "picks": { "TODAY": 27, "TOMORROW": 43 },
+  "events_fetched": 400,
+  "validated_markets": 1011
+}
+```
+
+L'écran Flutter affiche « 5 match(s) aujourd'hui · 10 demain » et plafonne le
+champ « Nombre de matchs » à `max_matches`.
+
+> **Pourquoi la fenêtre est courte.** Le flux prematch MegaPari renvoie les
+> matchs **par ordre chronologique** : une requête `Count=400` couvre environ
+> 8 jours (mesuré : 5 matchs le jour même, 74 le lendemain, puis les jours
+> suivants). Le plafond de matchs d'aujourd'hui + demain vient de la densité
+> réelle du calendrier à cet instant, pas d'une limite du moteur.
 
 ---
 
