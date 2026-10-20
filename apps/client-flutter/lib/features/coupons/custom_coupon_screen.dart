@@ -327,6 +327,29 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         return 'La côte totale visée doit être supérieure ou égale à 1.01.';
       case 'INVALID_NUM_MATCHES':
         return 'Le nombre de matchs doit être un entier supérieur ou égal à 1.';
+      case 'TARGET_UNREACHABLE_AT_MIN_PROBABILITY':
+      case 'TARGET_UNREACHABLE':
+        final d = (decoded is Map) ? decoded['details'] : null;
+        final maxOdds = (d is Map && d['max_reachable_odds'] is num)
+            ? (d['max_reachable_odds'] as num).toDouble()
+            : null;
+        final suggested = (d is Map && d['suggested_matches'] is num)
+            ? (d['suggested_matches'] as num).toInt()
+            : null;
+        return 'Chaque sélection doit avoir au moins 70 % de chances de passer. '
+            '${maxOdds != null ? "Avec ce nombre de matchs, la cote plafonne à ×${maxOdds.toStringAsFixed(2)}. " : ""}'
+            '${suggested != null ? "Augmente le nombre de matchs à $suggested pour viser cette côte." : "Augmente le nombre de matchs ou réduis la côte visée."}';
+      case 'NO_PICK_ABOVE_MIN_PROBABILITY':
+        final d = (decoded is Map) ? decoded['details'] : null;
+        final best = (d is Map && d['best_probability'] is num)
+            ? (d['best_probability'] as num).toInt()
+            : null;
+        return 'Aucune sélection n\'atteint 70 % de chances de passer en ce moment'
+            '${best != null ? " (meilleure : $best %)" : ""}. Réessaie dans quelques minutes.';
+      case 'LIVE_FEED_UNAVAILABLE':
+        return 'Impossible de lire les cotes en direct chez MegaPari. Vérifie ta connexion puis réessaie — aucune cote périmée ne sera utilisée.';
+      case 'B2B_RATE_LIMITED_FEED':
+        return 'MegaPari limite les lectures de cotes : réessaie dans quelques secondes.';
       case 'B2B_RATE_LIMITED':
         final d = (decoded is Map) ? decoded['details'] : null;
         final retry = (d is Map && d['retry_after_seconds'] is num)
@@ -431,8 +454,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               const SizedBox(height: 16),
               Text(
                 isFr
-                    ? 'Le moteur parcourt tous les marchés validés de chaque match (marge ≤ seuil) et retient la sélection qui rapproche le plus le combiné de ta côte cible. Jusqu\'à $_maxMatches matchs par combiné, côte libre — un seul code coupon pour tout le combiné.'
-                    : 'The engine scans every validated market of each match (margin ≤ threshold) and keeps the selection that brings the accumulator closest to your target odds. Up to $_maxMatches matches per accumulator, odds free — one single coupon code for the whole accumulator.',
+                    ? 'À chaque clic, les cotes sont relues EN DIRECT chez MegaPari (aucune cote en cache). Seules les sélections ayant au moins 70 % de chances de passer sont retenues, puis le moteur choisit celles qui rapprochent le combiné de ta côte cible. Jusqu\'à $_maxMatches matchs, un seul code coupon.'
+                    : 'On every click odds are fetched LIVE from MegaPari (nothing cached). Only selections with at least 70% chance of winning are kept, then the engine picks those that bring the accumulator closest to your target odds. Up to $_maxMatches matches, one single coupon code.',
                 style: TextStyle(fontSize: 10.5, color: Colors.grey[600], height: 1.35),
                 textAlign: TextAlign.center,
               ),
@@ -924,6 +947,24 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                                 style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: Colors.green),
                               ),
                             ),
+                          if ((r['source'] ?? '') == 'live')
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.bolt, size: 13, color: Colors.blue),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                    child: Text(
+                                      isFr
+                                          ? 'Cotes lues en direct chez MegaPari · sélections ≥ ${r['min_probability'] ?? 70} % de chances'
+                                          : 'Odds fetched live from MegaPari · picks ≥ ${r['min_probability'] ?? 70}% chance',
+                                      style: const TextStyle(fontSize: 10.5, color: Colors.blueGrey),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -1036,16 +1077,23 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     final selName = (p['selection_name'] ?? '').toString();
     final odds = (p['odds'] is num) ? (p['odds'] as num).toDouble() : null;
     final margin = (p['margin_percent'] is num) ? (p['margin_percent'] as num).toDouble() : null;
+    final prob = (p['probability_percent'] is num) ? (p['probability_percent'] as num).toInt() : null;
     final eventId = (p['event_id'] ?? '').toString();
     final selectionId = (p['selection_id'] ?? '').toString();
     final key = '$eventId|$selectionId';
     final codeState = _pickCodes[key];
 
     final title = home.isNotEmpty || away.isNotEmpty ? '$home – $away' : '#$eventId';
+    // Le libellé renvoyé par le bookmaker contient déjà la ligne
+    // (« Handicap 2 (1.5) », « Total (2.5) Over ») : on n'affiche alors que lui.
+    final marketLabel = _marketLabel(market, line);
+    final redundantLabel = selName.isNotEmpty &&
+        (selName.toLowerCase().startsWith(marketLabel.toLowerCase().split(' ').first) ||
+            selName.toLowerCase().contains(marketLabel.toLowerCase()));
     final subtitleParts = <String>[
       if (league.isNotEmpty) league,
       if (sportName.isNotEmpty) sportName,
-      if (market.isNotEmpty) _marketLabel(market, line),
+      if (market.isNotEmpty && !redundantLabel) marketLabel,
       if (selName.isNotEmpty) selName,
     ];
 
@@ -1103,9 +1151,17 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                       style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: cs.primary),
                     ),
                   ),
-                  if (margin != null)
+                  if (prob != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        '${prob}% de chance',
+                        style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: Colors.green),
+                      ),
+                    ),
+                  if (margin != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 1),
                       child: Text(
                         'marge ${margin.toStringAsFixed(1)}%',
                         style: TextStyle(fontSize: 9.5, color: Colors.grey[600]),

@@ -126,6 +126,49 @@ export class MegaPariCouponService {
   }
 
   /**
+   * Événements prematch AVEC leurs cotes, lus à l'instant (LoadSingle v2).
+   *
+   * Utilisé par le générateur de combiné : les cotes doivent être celles du
+   * moment du clic, pas celles d'un cache vieux de 10 minutes.
+   *
+   * ⚠️ Limite BetB2B : 1 requête / 5 s. `Count` est plafonné à 1000 par l'API.
+   */
+  async fetchPrematchEvents(limit = 400, sportId?: number | null): Promise<any[]> {
+    const token = await this.getAccessToken();
+    const params: Record<string, string> = {
+      Ref: String(this.ref),
+      Lng: 'en',
+      SchemeOfGettingOddsOperations: 'GetAllOdds',
+      Count: String(Math.max(1, Math.min(limit, 1000))),
+    };
+    if (sportId !== undefined && sportId !== null) params.SportIds = String(sportId);
+
+    try {
+      const res = await axios.get(`${this.gatewayBase}/datafeed/prematch/api/v2/sportevents`, {
+        params,
+        // `Accept: */*` est obligatoire sur cette passerelle (cf. sharecoupon).
+        headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
+        timeout: 30000,
+      });
+      const items = Array.isArray(res.data?.items) ? res.data.items : [];
+      return items.filter((it: any) => it && Array.isArray(it.oddsLocalization) && it.oddsLocalization.length);
+    } catch (e: any) {
+      const status = e?.response?.status;
+      const detail = JSON.stringify(e?.response?.data ?? e?.message).slice(0, 300);
+      this.logger.error(`[MEGAPARI] flux prematch indisponible (HTTP ${status}) : ${detail}`);
+      throw new BadRequestException({
+        error: 'LIVE_FEED_UNAVAILABLE',
+        reason_code: status === 429 || status === 400 ? 'B2B_RATE_LIMITED' : 'LIVE_FEED_UNAVAILABLE',
+        message:
+          status === 429 || status === 400
+            ? 'MegaPari limite les requêtes : réessaie dans quelques secondes.'
+            : 'Impossible de lire les cotes en direct chez MegaPari. Réessaie dans quelques secondes.',
+        details: { upstream_status: status ?? null },
+      });
+    }
+  }
+
+  /**
    * Répertoire officiel des sports (noms réels proposés par le bookmaker).
    * GET /datafeed/directories/api/v2/sports?ref=…&lng=…
    * Cache Redis 6 h : la liste change très rarement.

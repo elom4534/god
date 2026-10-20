@@ -15,8 +15,40 @@ Backend : `apps/api-node/src/modules/coupons/` (NestJS) + ETL `pipelines/etl/ing
 | Recherche | sur **tous les marchés validés de chaque match** (1X2, Double chance, Handicap, Totaux, BTTS…) |
 | Résultat | cote obtenue + **écart en %** avec la cible + drapeau `exact` |
 | Code coupon | **UN SEUL code pour tout le combiné** (`couponMode: "COMBO"`) |
+| Source des cotes | **LIVE** : relues chez MegaPari à chaque clic (aucun cache métier) |
+| Seuil de sécurité | chaque sélection doit avoir **≥ 70 %** de chances de passer (`COUPON_MIN_PROBABILITY`) |
 
 Le moteur ne fabrique jamais de cote : il choisit parmi les cotes réellement proposées.
+
+---
+
+## 1 bis. Comment les marchés sont choisis (résumé opérationnel)
+
+```
+CLIC « Générer »
+  ├─ LoadSingle v2 chez MegaPari  → événements + cotes DU MOMENT
+  ├─ regroupement en marchés      → 1X2, Double chance, Handicap, Totaux
+  ├─ Margin Guard (marge ≤ 5 %)   → élimine les marchés incohérents
+  ├─ probabilité fair par issue   → p = (1/cote) / Σ(1/cote)   (marge retirée)
+  ├─ filtre produit               → on ne garde que p ≥ 70 %
+  └─ moteur de composition        → 1 sélection par match, N matchs,
+                                    produit des cotes ≈ côte visée
+```
+
+Exemple mesuré : **6 matchs visés à 6.78** → obtenu **6.76** (0.27 %), toutes les
+sélections entre **70 % et 72 %**.
+
+Contrainte qui en découle : avec 70 % minimum, la cote d'une sélection plafonne
+naturellement autour de 1.43. Pour une cible donnée, le nombre de matchs minimal
+est donc borné par le haut. L'API ne renvoie pas une erreur muette mais :
+
+```json
+{
+  "reason_code": "TARGET_UNREACHABLE_AT_MIN_PROBABILITY",
+  "message": "Avec 70 % de chances minimum par sélection, 5 matchs plafonnent à une cote de 5.10. Augmente le nombre de matchs à 6 (ou plus) pour viser 6.78.",
+  "details": { "min_probability": 70, "requested_matches": 5, "max_reachable_odds": 5.10, "suggested_matches": 6 }
+}
+```
 
 ---
 
@@ -65,13 +97,18 @@ Réponse :
   "deepLink": "https://megapari.com/en?coupon-code=YZLAH",
   "message": "Code coupon combiné généré (50 sélections) — code YZLAH",
   "retry_after_seconds": null,
+  "source": "live",
+  "odds_as_of": "2026-10-20T22:26:41.512Z",
+  "min_probability": 70,
+  "events_fetched": 400,
   "coupons": [ { "event_id": "*", "market_type": "COMBO", "selection_name": "50 sélections",
                  "odds": 4997.59, "success": true, "couponCode": "YZLAH",
                  "deepLink": "https://megapari.com/en?coupon-code=YZLAH" } ],
   "picks": [ { "event_id": "…", "home": "…", "away": "…", "league": "…",
                "sport_id": 1, "sport_name": "Football",
                "market_type": "OVER_UNDER", "selection_name": "Total (2.5) Over",
-               "line": 2.5, "odds": 1.92, "margin_percent": 1.51 } ]
+               "line": 2.5, "odds": 1.92, "margin_percent": 1.51,
+               "probability_percent": 71 } ]
 }
 ```
 
@@ -170,6 +207,18 @@ GET {gateway}/datafeed/directories/api/v1/sharecoupon
   la validation métier reste côté composition (marge, marchés réels).
 - `couponCode` est renvoyé avant la liste des sélections dans l'UI : plus besoin de
   faire défiler 50 lignes pour récupérer le code.
+
+### Cotes live vs cache
+
+| | Avant | Maintenant |
+|---|---|---|
+| source | cache Redis ETL (10 min) | **LoadSingle v2 au clic** (`live-odds.ts`) |
+| fraîcheur | jusqu'à 15 min (TTL) | quelques secondes |
+| probabilité | non calculée (choix « au plus proche de la cible ») | **fair odds**, filtre ≥ 70 % |
+| panne bookmaker | on servait du cache périmé | erreur explicite `LIVE_FEED_UNAVAILABLE`, **jamais de cote périmée** |
+
+Le cache Redis reste utilisé **uniquement** pour les compteurs d'affichage
+(`/coupons/sports`, disponibilité) — jamais pour composer un combiné.
 
 ### Limite de débit : 1 code / minute
 

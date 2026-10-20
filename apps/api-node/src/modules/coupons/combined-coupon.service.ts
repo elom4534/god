@@ -1,6 +1,8 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import axios from 'axios';
 import { createClient } from 'redis';
 import { MegaPariCouponService, Pick } from '../bookmaker/megapari-coupon.service';
+import { buildLivePool } from './live-odds';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -29,6 +31,8 @@ export interface ValuePick {
   odds: number;
   logOdds: number;
   margin_percent: number;
+  /** Probabilité "fair" (marge retirée) que la sélection passe — 0..1. */
+  prob: number;
   home: string;
   away: string;
   league: string;
@@ -45,6 +49,12 @@ export interface ComposeOptions {
   sportId?: number | null;
   /** Nombre maximal d'événements lus dans le cache (garde-fou mémoire). */
   maxEvents?: number;
+  /** Seuil de probabilité minimal par sélection (0..1). Défaut : 70 %. */
+  minProbability?: number;
+  /** Pool déjà chargé (Live Feed) — évite un second appel bookmaker. */
+  pool?: ValuePick[];
+  /** Provenance du pool, reportée dans la réponse. */
+  source?: 'live' | 'cache';
 }
 
 /** Mapping tag de sélection → type BetB2B (oddsLocalization.type). */
@@ -91,6 +101,15 @@ export class CombinedCouponService {
   /** Garde-fou technique uniquement (protection mémoire) — pas une limite produit. */
   private readonly maxEventsScanned = parseInt(process.env.COUPON_MAX_EVENTS_SCANNED || '5000', 10);
   private readonly marginThreshold = parseFloat(process.env.MARGIN_THRESHOLD_PERCENT || '5');
+
+  /**
+   * Règle produit : une sélection n'est retenue que si sa probabilité de
+   * passer atteint ce seuil (70 % par défaut).
+   */
+  private readonly minProbability = Math.min(
+    0.99,
+    Math.max(0.01, parseFloat(process.env.COUPON_MIN_PROBABILITY || '70') / 100),
+  );
 
   constructor(private mega: MegaPariCouponService) {}
 
@@ -154,6 +173,10 @@ export class CombinedCouponService {
           const exactType = typeof s.b2b_type === 'number' ? s.b2b_type : null;
           const exactParam = typeof s.b2b_parameter === 'number' ? s.b2b_parameter : null;
 
+          // Probabilité fair : (1/cote) / Σ(1/cote) = (1/cote) / (1 + marge).
+          const invSum = 1 + margin / 100;
+          const prob = Math.min(0.995, (1 / odds) / Math.max(invSum, 1e-6));
+
           picks.push({
             event_id: eventId,
             market_id: String(vm.market_id),
@@ -165,6 +188,7 @@ export class CombinedCouponService {
             odds,
             logOdds: Math.log(odds),
             margin_percent: margin,
+            prob,
             home: String(data.home_team || ''),
             away: String(data.away_team || ''),
             league: String(data.league || ''),
@@ -181,6 +205,77 @@ export class CombinedCouponService {
       }
     }
     return picks;
+  }
+
+  // ------------------------------------------------------------ live feed --
+
+  /**
+   * Charge les marchés DIRECTEMENT chez MegaPari (BetB2B), à l'instant du clic.
+   *
+   * Aucune lecture du cache métier : une cote peut bouger en quelques secondes,
+   * et générer un code coupon sur des cotes périmées n'a aucun sens. Le flux
+   * est regroupé en marchés puis filtré par le même Margin Guard fail-closed
+   * que l'ETL, et chaque issue reçoit sa probabilité « fair » (marge retirée).
+   */
+  async loadLivePicks(sportId?: number | null, limit = 400): Promise<{
+    picks: ValuePick[];
+    asOf: string;
+    eventsFetched: number;
+    validatedMarkets: number;
+  }> {
+    // Pool plus large que le nombre de matchs demandé : la contrainte de
+    // probabilité élimine beaucoup de matchs, il faut donc du choix.
+    const events = await this.mega.fetchPrematchEvents(limit, sportId ?? null);
+
+    const names = new Map<number, string>();
+    try {
+      for (const s of await this.mega.getSportsDirectory('en')) names.set(s.id, s.name);
+    } catch { /* répertoire indisponible : noms de sport vides, sans impact */ }
+
+    const pool = buildLivePool(events, Object.fromEntries(names), {
+      sportId: sportId ?? null,
+      marginThreshold: this.marginThreshold,
+    });
+
+    const picks: ValuePick[] = [];
+    for (const ev of pool.events) {
+      for (const vm of ev.markets) {
+        if (vm.margin_percent > this.marginThreshold) continue;
+        for (const sel of vm.selections) {
+          if (!Number.isFinite(sel.odds) || sel.odds <= 1.0) continue;
+          if (!Number.isFinite(sel.prob) || sel.prob <= 0) continue;
+          picks.push({
+            event_id: ev.event_id,
+            market_id: vm.market_id,
+            selection_id: sel.selection_id,
+            market_type: vm.market_type,
+            selection_name: sel.name,
+            tags: sel.tags,
+            line: vm.line,
+            odds: sel.odds,
+            logOdds: Math.log(sel.odds),
+            margin_percent: vm.margin_percent,
+            prob: sel.prob,
+            home: ev.home,
+            away: ev.away,
+            league: ev.league,
+            sport: 'football',
+            sport_id: ev.sport_id,
+            sport_name: ev.sport_name,
+            start_time: ev.start_time,
+            b2b_type: sel.b2b_type,
+            b2b_parameter: sel.b2b_parameter,
+          });
+        }
+      }
+    }
+
+    return {
+      picks,
+      asOf: new Date().toISOString(),
+      eventsFetched: pool.eventsFetched,
+      validatedMarkets: pool.validatedMarkets,
+    };
   }
 
   /** Sports réels proposés par le bookmaker, avec le nombre de matchs disponibles. */
@@ -294,14 +389,37 @@ export class CombinedCouponService {
       });
     }
 
-    const pool = await this.loadValuePicks(options.sportId ?? null);
-    if (pool.length === 0) {
+    // --- Source du pool : LIVE par défaut (cotes de dernière minute) --------
+    const minProb = Math.min(
+      0.99,
+      Math.max(0.01, options.minProbability ?? this.minProbability),
+    );
+
+    const rawPool = options.pool ?? (await this.loadLivePicks(options.sportId ?? null)).picks;
+    if (rawPool.length === 0) {
       throw new BadRequestException({
         error: 'NO_VALUE_PICKS',
         reason_code: 'NO_VALUE_PICKS',
         message: options.sportId
-          ? 'Aucune Value Pick disponible pour cette discipline (marge au-dessus du seuil ou aucun match à venir).'
-          : 'Aucune Value Pick disponible (cache MegaPari vide ou marge au-dessus du seuil). Lance un scan puis réessaie.',
+          ? 'Aucun marché validé pour cette discipline à cet instant (marge au-dessus du seuil ou aucun match à venir).'
+          : 'Aucun marché validé disponible à cet instant (marge au-dessus du seuil ou aucun match à venir).',
+      });
+    }
+
+    // --- Règle produit : ne garder que les sélections assez sûres ----------
+    const pool = rawPool.filter(p => p.prob >= minProb);
+    if (pool.length === 0) {
+      const best = rawPool.reduce((a, b) => (a.prob >= b.prob ? a : b));
+      throw new BadRequestException({
+        error: 'NO_PICK_ABOVE_MIN_PROBABILITY',
+        reason_code: 'NO_PICK_ABOVE_MIN_PROBABILITY',
+        message:
+          `Aucune sélection n'atteint ${Math.round(minProb * 100)} % de chances de passer ` +
+          `(meilleure trouvée : ${Math.round(best.prob * 100)} %). Réessaie dans quelques minutes.`,
+        details: {
+          min_probability: Math.round(minProb * 100),
+          best_probability: Math.round(best.prob * 100),
+        },
       });
     }
 
@@ -319,6 +437,44 @@ export class CombinedCouponService {
         reason_code: 'NOT_ENOUGH_EVENTS',
         message: `Seulement ${events.length} match(s) disponible(s) pour cette sélection : réduis le nombre de matchs ou choisis « Tous les sports ».`,
         details: { available: events.length, requested: n },
+      });
+    }
+
+    // --- Borne haute : cote maximale atteignable sous la contrainte 70 % ---
+    // Comme on prend exactement 1 sélection par match, la cote maximale d'un
+    // combiné de n matchs est le produit des n plus grosses cotes autorisées.
+    const maxOddsByEvent = new Map<string, number>();
+    for (const p of pool) {
+      const cur = maxOddsByEvent.get(p.event_id) ?? 0;
+      if (p.odds > cur) maxOddsByEvent.set(p.event_id, p.odds);
+    }
+    const topOdds = [...maxOddsByEvent.values()].sort((a, b) => b - a).slice(0, n);
+    const maxReachable = topOdds.reduce((acc, o) => acc * o, 1);
+
+    if (target > maxReachable * 1.0001) {
+      // Nombre de matchs nécessaire pour que la cible devienne atteignable.
+      const allOdds = [...maxOddsByEvent.values()].sort((a, b) => b - a);
+      let product = 1;
+      let needed = 0;
+      for (const o of allOdds) {
+        product *= o;
+        needed += 1;
+        if (product >= target) break;
+      }
+      throw new BadRequestException({
+        error: 'TARGET_UNREACHABLE',
+        reason_code: 'TARGET_UNREACHABLE_AT_MIN_PROBABILITY',
+        message:
+          `Avec ${Math.round(minProb * 100)} % de chances minimum par sélection, ` +
+          `${n} matchs plafonnent à une cote de ${maxReachable.toFixed(2)}. ` +
+          `Augmente le nombre de matchs à ${needed} (ou plus) pour viser ${target}.`,
+        details: {
+          min_probability: Math.round(minProb * 100),
+          requested_matches: n,
+          requested_target_odds: target,
+          max_reachable_odds: Math.round(maxReachable * 100) / 100,
+          suggested_matches: needed,
+        },
       });
     }
 
@@ -476,9 +632,19 @@ export class CombinedCouponService {
     language?: string,
     sportId?: number | null,
     includeIndividualCodes = false,
+    minProbability?: number,
   ) {
-    const composed = await this.compose(numMatches, targetTotalOdds, { sportId });
+    // 1) Cotes de dernière minute : un SEUL appel bookmaker, réutilisé pour
+    //    la composition ET pour le contrôle de cohérence des seuils.
+    const live = await this.loadLivePicks(sportId ?? null);
+    const composed = await this.compose(numMatches, targetTotalOdds, {
+      sportId,
+      pool: live.picks,
+      minProbability,
+      source: 'live',
+    });
     const picks = composed.picks;
+    const minProb = Math.min(0.99, Math.max(0.01, minProbability ?? this.minProbability));
 
     const label = `Combiné ${picks.length} matchs - Côte ${composed.totalOdds.toFixed(2)}`;
     const sports = [...new Set(picks.map(p => p.sport_name).filter(Boolean))];
@@ -621,6 +787,9 @@ export class CombinedCouponService {
       couponCode,
       success,
       retryAfterSeconds,
+      source: 'live',
+      oddsAsOf: live.asOf,
+      minProbability: Math.round(minProb * 100),
     }));
 
     return {
@@ -639,6 +808,11 @@ export class CombinedCouponService {
       deepLink,
       message,
       retry_after_seconds: retryAfterSeconds,
+      // Traçabilité : d'où viennent les cotes et quelle règle a été appliquée.
+      source: 'live',
+      odds_as_of: live.asOf,
+      min_probability: Math.round(minProb * 100),
+      events_fetched: live.eventsFetched,
       coupons,
       picks: picks.map(p => ({
         event_id: p.event_id,
@@ -656,6 +830,8 @@ export class CombinedCouponService {
         line: p.line,
         odds: p.odds,
         margin_percent: p.margin_percent,
+        // Probabilité « fair » de passer (marge retirée) — arrondie à l'unité.
+        probability_percent: Math.round(p.prob * 100),
       })),
     };
   }
