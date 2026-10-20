@@ -494,8 +494,11 @@ export class MegaPariCouponService {
       qs.append('playerId', String(p.b2b_playerId ?? 0));
     }
     qs.append('kind', '3'); // 3 = prematch (line) — confirmé par la doc OpenAPI
-    qs.append('gr', String(parseInt(process.env.MEGAPARI_GR || '0', 10)));
-    qs.append('cnt', String(parseInt(process.env.MEGAPARI_CNT || '0', 10)));
+    // `gr`/`cnt` : défaut documenté = 0 (l'hôte du deeplink est `ref+gr+cnt`).
+    // On les émet explicitement pour que le bloc de paramètres soit identique
+    // d'une requête à l'autre (déterminisme). Surcharge : MEGAPARI_GR / _CNT.
+    qs.append('gr', String(parseInt(process.env.MEGAPARI_GR || '0', 10) || 0));
+    qs.append('cnt', String(parseInt(process.env.MEGAPARI_CNT || '0', 10) || 0));
     qs.append('lng', lng);
     if (process.env.MEGAPARI_PARTNER_LINK) qs.append('partnerLink', process.env.MEGAPARI_PARTNER_LINK);
     this.logger.log(`[MEGAPARI B2B] query: ${qs.toString()}`);

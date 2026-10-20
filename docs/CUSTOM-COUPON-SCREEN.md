@@ -286,6 +286,23 @@ combinés identiques produisent exactement la même requête.
 Le cache Redis reste utilisé **uniquement** pour les compteurs d'affichage
 (`/coupons/sports`, disponibilité) — jamais pour composer un combiné.
 
+### Contrat `sharecoupon` (relu dans l'OpenAPI le 20/10/2026)
+
+`GET /datafeed/directories/api/v1/sharecoupon` — paramètres **répétés**, un bloc
+par sélection, dans cet ordre :
+
+| Paramètre | Valeur envoyée | Remarque |
+|---|---|---|
+| `sportEventId` | `sportEventId` du flux | requis |
+| `type` | `oddsLocalization.type` | 1 = 1X2, 10 = Total Under… |
+| `oddsMarket` | `oddsLocalization.oddsMarket` | **la cote**, pas un id de marché |
+| `parameter` | `oddsLocalization.parameter` (0 par défaut) | `8.5` pour un total |
+| `playerId` | `oddsLocalization.playerId` (0 par défaut) | > 0 = marché joueur |
+
+Puis `kind=3` (3 = **Line**, 1 = Live), `gr=0`, `cnt=0`, `lng=en`.
+Les cinq champs d'une sélection sont **positionnels** : un bloc incomplet décale
+tous les suivants. Réponse : une chaîne JSON `"https://…?coupon-code=XXXXX"`.
+
 ### Limite de débit : 1 code / minute
 
 | Constat | Correctif |
@@ -304,6 +321,13 @@ combiné identique réutilise son code sans re-solliciter la passerelle.
 | le combiné pouvait contenir un match **déjà en live** (seul un match commencé depuis > 10 min était filtré) | marge de **30 min** avant le coup d'envoi (`COUPON_MIN_LEAD_MINUTES`) |
 | blocs `sportEventId/type/oddsMarket` émis **sans** `parameter`/`playerId` pour les 1X2 → risque de décalage des blocs | bloc positionnel complet (5 champs) pour **chaque** sélection |
 | ordre des paramètres variable d'une requête à l'autre | tri déterministe des sélections avant émission |
+
+**Palier de sanction de la passerelle** (mesuré le 20/10/2026) : après plusieurs
+créations rapprochées, `sharecoupon` renvoie HTTP 400
+`"LiveBetService returned 200"` **pendant plus de 5 minutes**, y compris pour un
+payload qui avait réussi 10 minutes plus tôt. Ce n'est donc pas un problème de
+contrat : il faut espacer les créations (1/min maximum, 65 s de créneau côté
+API) et ne pas boucler sur les erreurs.
 
 Vérifié le 20/10/2026 à 23:12 UTC : `GET /coupons/window` renvoie
 `min_lead_minutes: 30`, `today_events: 0` (tous les matchs du jour étaient à

@@ -809,9 +809,14 @@ export class CombinedCouponService {
     const picks = composed.picks;
     const minProb = Math.min(0.99, Math.max(0.01, minProbability ?? this.minProbability));
 
+    // Libellé : on n'affiche jamais un « 0 aujourd'hui ».
     const dayLabel = composed.dayScope === 'TODAY'
       ? "aujourd'hui"
-      : `${composed.daySummary.today} aujourd'hui + ${composed.daySummary.tomorrow} demain`;
+      : composed.daySummary.today === 0
+        ? 'demain'
+        : composed.daySummary.tomorrow === 0
+          ? "aujourd'hui"
+          : `${composed.daySummary.today} aujourd'hui + ${composed.daySummary.tomorrow} demain`;
     const label = `Combiné ${picks.length} matchs (${dayLabel}) - Côte ${composed.totalOdds.toFixed(2)}`;
     const sports = [...new Set(picks.map(p => p.sport_name).filter(Boolean))];
 
