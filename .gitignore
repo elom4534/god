@@ -19,3 +19,5 @@ apps/client-flutter/.flutter-plugins*
 apps/api-node/node_modules/
 apps/ml-python/.mypy_cache/
 miniodata/
+alwaysdata_deploy_key
+alwaysdata_deploy_key.pub
