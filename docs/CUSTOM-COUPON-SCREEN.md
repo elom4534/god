@@ -39,8 +39,12 @@ compose(N, cible)
 - Le jour est calculé dans le **fuseau de l'utilisateur** (`COUPON_TIMEZONE`,
   défaut `Africa/Lome`), pas dans celui du serveur : un match à 00:30 reste
   « aujourd'hui » même si le serveur est encore la veille.
-- Un match **déjà commencé** (plus de 10 min) est exclu, même s'il traîne
-  encore dans le flux prematch.
+- Un match dont le **coup d'envoi est à moins de 30 minutes** est exclu
+  (`COUPON_MIN_LEAD_MINUTES`, défaut `30`). Le coupon est créé en **prematch**
+  (`kind=3`) : dès qu'un match bascule en live, MegaPari répond « les
+  événements du coupon de paris sont terminés » et le code devient inutilisable.
+  La marge de 30 min couvre le temps de génération, de copie et de collage du
+  code.
 - Réponse : `day_scope`, `day_summary {today, tomorrow}`, `today_events`,
   `tomorrow_events`, `timezone` et `day` (`TODAY` / `TOMORROW`) sur chaque
   sélection. Le libellé devient
@@ -249,10 +253,19 @@ répétés** et renvoie un vrai code combiné.
 ```
 GET {gateway}/datafeed/directories/api/v1/sharecoupon
     ?ref=192
-    &sportEventId=A&sportEventId=B&type=..&type=..&oddsMarket=..&oddsMarket=..[&parameter=..&parameter=..]
-    &kind=3&lng=en
+    &sportEventId=A&type=1&oddsMarket=1.229&parameter=0&playerId=0
+    &sportEventId=B&type=1&oddsMarket=1.291&parameter=0&playerId=0
+    &kind=3&gr=0&cnt=0&lng=en
 → "https://megapari.com/en?coupon-code=XXXXX"
 ```
+
+**Les cinq champs d'une sélection sont un bloc positionnel** :
+`sportEventId`, `type`, `oddsMarket`, `parameter`, `playerId`. Ils sont émis
+**systématiquement, dans cet ordre, pour chaque sélection** (valeur `0` par
+défaut). Un bloc incomplet décale la correspondance des blocs suivants : le
+coupon pointe alors vers de mauvais marchés et MegaPari le déclare « terminé ».
+Les sélections sont triées (`event`, `type`, `parameter`) pour que deux
+combinés identiques produisent exactement la même requête.
 
 - La réponse est une **chaîne JSON entre guillemets** ; `coupon-code=` est extrait.
 - 50 sélections tiennent dans **une seule requête** (testé : cotes 1.04 → 1.29, code `RYZ1H`).
@@ -283,6 +296,20 @@ Le cache Redis reste utilisé **uniquement** pour les compteurs d'affichage
 
 Cache : clé `bookmaker:combo:megapari:{ref}:{sha1(ref|sélections)}` — TTL 15 min, donc un
 combiné identique réutilise son code sans re-solliciter la passerelle.
+
+### Pourquoi MegaPari répondait « les événements du coupon de paris sont terminés »
+
+| Cause | Correctif |
+|---|---|
+| le combiné pouvait contenir un match **déjà en live** (seul un match commencé depuis > 10 min était filtré) | marge de **30 min** avant le coup d'envoi (`COUPON_MIN_LEAD_MINUTES`) |
+| blocs `sportEventId/type/oddsMarket` émis **sans** `parameter`/`playerId` pour les 1X2 → risque de décalage des blocs | bloc positionnel complet (5 champs) pour **chaque** sélection |
+| ordre des paramètres variable d'une requête à l'autre | tri déterministe des sélections avant émission |
+
+Vérifié le 20/10/2026 à 23:12 UTC : `GET /coupons/window` renvoie
+`min_lead_minutes: 30`, `today_events: 0` (tous les matchs du jour étaient à
+moins de 30 min du coup d'envoi), `tomorrow_events: 10`. Le combiné généré
+(`H9UFH`, 3 sélections, cote 1.90, `day_scope TODAY_TOMORROW`) ne contient que
+des matchs du lendemain à 19:00 UTC, soit ~20 h de marge.
 
 ## 6. Robustesse B2B (découvertes du 20/10/2026)
 

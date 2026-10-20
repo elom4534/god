@@ -498,7 +498,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               const SizedBox(height: 16),
               Text(
                 isFr
-                    ? 'Cotes relues EN DIRECT chez MegaPari à chaque clic. Seules les sélections ayant au moins 70 % de chances de passer sont retenues. Les matchs sont obligatoirement ceux d\'aujourd\'hui ; si la sélection n\'est pas possible, le moteur complète avec demain — jamais au-delà. Un seul code coupon.'
+                    ? 'Cotes relues EN DIRECT chez MegaPari à chaque clic. Seules les sélections ayant au moins 70 % de chances de passer sont retenues. Les matchs sont ceux d\'aujourd\'hui, complétés par demain si nécessaire — jamais au-delà — et leur coup d\'envoi doit être à plus de 30 min (sinon le coupon serait déjà en live chez MegaPari). Un seul code coupon.'
                     : 'Odds fetched LIVE from MegaPari on every click. Only selections with at least 70% chance of winning are kept. Matches are today\'s only; if the selection cannot be built, tomorrow is used — never beyond. One single coupon code.',
                 style: TextStyle(fontSize: 10.5, color: Colors.grey[600], height: 1.35),
                 textAlign: TextAlign.center,
@@ -525,8 +525,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       final t = _todayEvents ?? 0;
       final m = _tomorrowEvents ?? 0;
       text = isFr
-          ? '$t match(s) aujourd\'hui · $m demain — « $_selectedSportLabel » (cotes live, sélections ≥ 70 %)'
-          : '$t match(es) today · $m tomorrow — “$_selectedSportLabel” (live odds, picks ≥ 70%)';
+          ? '$t match(s) aujourd\'hui · $m demain — « $_selectedSportLabel » (cotes live, sélections ≥ 70 %, coup d\'envoi dans ≥ 30 min)'
+          : '$t match(es) today · $m tomorrow — “$_selectedSportLabel” (live odds, picks ≥ 70%, kick-off in ≥ 30 min)';
       color = (t + m) > 0 ? Colors.green : Colors.orange;
       icon = (t + m) > 0 ? Icons.check_circle_outline : Icons.info_outline;
     } else if (_availableEvents != null) {

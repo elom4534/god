@@ -458,9 +458,25 @@ export class MegaPariCouponService {
     await this.acquireShareSlot();
     const token = await this.getAccessToken();
 
+    // ⚠️ Les paramètres sont répétés N fois (un bloc par sélection) : la
+    // passerelle associe `sportEventId`, `type`, `oddsMarket`, `parameter` et
+    // `playerId` **par position**. Si une seule sélection omettait
+    // `parameter` (cas d'un 1X2, paramètre 0 côté BetB2B), tous les blocs
+    // suivants seraient décalés et le coupon pointerait vers de mauvais
+    // marchés — MegaPari affiche alors « les événements sont terminés ».
+    // On envoie donc TOUJOURS les cinq champs, dans le même ordre, pour chaque
+    // sélection.
+    const ordered = [...picks].sort((a, b) => {
+      const ea = a.sportEventId ?? parseInt(a.event_id, 10);
+      const eb = b.sportEventId ?? parseInt(b.event_id, 10);
+      if (ea !== eb) return ea - eb;
+      if ((a.b2b_type ?? 0) !== (b.b2b_type ?? 0)) return (a.b2b_type ?? 0) - (b.b2b_type ?? 0);
+      return (a.b2b_parameter ?? 0) - (b.b2b_parameter ?? 0);
+    });
+
     const qs = new URLSearchParams();
     qs.append('ref', String(c.ref));
-    for (const p of picks) {
+    for (const p of ordered) {
       const sportEventId = p.sportEventId ?? parseInt(p.event_id, 10);
       const oddsMarket = p.b2b_oddsMarket;
       const type = p.b2b_type;
@@ -474,13 +490,15 @@ export class MegaPariCouponService {
       qs.append('sportEventId', String(sportEventId));
       qs.append('type', String(type));
       qs.append('oddsMarket', String(oddsMarket));
-      if (p.b2b_parameter !== undefined && p.b2b_parameter !== null) {
-        qs.append('parameter', String(p.b2b_parameter));
-      }
+      qs.append('parameter', String(p.b2b_parameter ?? 0));
+      qs.append('playerId', String(p.b2b_playerId ?? 0));
     }
-    qs.append('kind', '3'); // 3 = prematch (line)
+    qs.append('kind', '3'); // 3 = prematch (line) — confirmé par la doc OpenAPI
+    qs.append('gr', String(parseInt(process.env.MEGAPARI_GR || '0', 10)));
+    qs.append('cnt', String(parseInt(process.env.MEGAPARI_CNT || '0', 10)));
     qs.append('lng', lng);
     if (process.env.MEGAPARI_PARTNER_LINK) qs.append('partnerLink', process.env.MEGAPARI_PARTNER_LINK);
+    this.logger.log(`[MEGAPARI B2B] query: ${qs.toString()}`);
 
     const url = `${this.gatewayBase}/datafeed/directories/api/v1/sharecoupon?${qs.toString()}`;
     this.logger.log(`[MEGAPARI B2B] sharecoupon combiné — ${picks.length} sélections`);

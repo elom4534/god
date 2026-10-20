@@ -55,6 +55,7 @@ export interface LiveSelection {
   tags: string[];
   b2b_type: number;
   b2b_parameter: number | null;
+  b2b_player_id: number;
   odds: number;
   /** Probabilité fair (marge retirée), 0..1. */
   prob: number;
@@ -139,6 +140,7 @@ interface Bucket {
     tags: string[];
     b2b_type: number;
     b2b_parameter: number | null;
+    b2b_player_id: number;
     odds: number;
   }>;
   blocked: boolean;
@@ -192,6 +194,8 @@ function groupSelections(rawSelections: any[], eventId: string): Bucket[] {
       b2b_type: typeId,
       // Paramètre BRUT signé (indispensable pour sharecoupon.parameter).
       b2b_parameter: parameter,
+      // playerId BetB2B : 0 pour un marché d'équipe, >0 pour un marché joueur.
+      b2b_player_id: toNumber(sel.playerId) ?? 0,
       odds,
     });
     if (sel.isBlocked) bucket.blocked = true;
@@ -231,6 +235,7 @@ function validateMarket(bucket: Bucket, threshold: number): LiveMarket | null {
       tags: s.tags,
       b2b_type: s.b2b_type,
       b2b_parameter: s.b2b_parameter,
+      b2b_player_id: s.b2b_player_id,
       odds: Math.round(s.odds * 1000) / 1000,
       prob: Math.round(Math.min(Math.max(prob, 0), 0.995) * 10000) / 10000,
     };

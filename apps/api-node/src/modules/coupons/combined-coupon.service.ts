@@ -43,6 +43,7 @@ export interface ValuePick {
   start_time: string | null;
   b2b_type: number;
   b2b_parameter: number | null;
+  b2b_player_id?: number;
 }
 
 export interface ComposeOptions {
@@ -208,6 +209,7 @@ export class CombinedCouponService {
             b2b_parameter: exactParam !== null
               ? exactParam
               : ((String(vm.market_type) === 'OVER_UNDER' || String(vm.market_type) === 'HANDICAP' || String(vm.market_type) === 'CORNERS_OU') ? line : null),
+            b2b_player_id: 0,
           });
         });
       }
@@ -242,6 +244,7 @@ export class CombinedCouponService {
 
     return {
       timezone: window.timeZone,
+      min_lead_minutes: window.minLeadMinutes,
       as_of: live.asOf,
       min_probability: Math.round(this.minProbability * 100),
       today_events: todayEvents,
@@ -316,6 +319,7 @@ export class CombinedCouponService {
             start_time: ev.start_time,
             b2b_type: sel.b2b_type,
             b2b_parameter: sel.b2b_parameter,
+            b2b_player_id: sel.b2b_player_id ?? 0,
           });
         }
       }
@@ -820,7 +824,8 @@ export class CombinedCouponService {
       sportEventId: parseInt(p.event_id, 10),
       b2b_type: p.b2b_type,
       b2b_oddsMarket: p.odds,
-      b2b_parameter: p.b2b_parameter ?? undefined,
+      b2b_parameter: p.b2b_parameter ?? 0,
+      b2b_playerId: p.b2b_player_id ?? 0,
       b2b_kind: 3,
       b2b_lng: language || 'en',
     }));

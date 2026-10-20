@@ -13,6 +13,16 @@ export type MatchDay = 'TODAY' | 'TOMORROW' | 'OUT_OF_WINDOW';
 
 const DEFAULT_TZ = process.env.COUPON_TIMEZONE || 'Africa/Lome';
 
+/**
+ * Délai minimal entre l'instant présent et le coup d'envoi.
+ *
+ * Un coupon MegaPari est un coupon **prematch** (`kind=3`). Si le match démarre
+ * pendant que l'utilisateur colle le code, le bookmaker répond « les événements
+ * du coupon sont terminés » : le marché a basculé en live. On impose donc une
+ * marge de sécurité (30 min par défaut).
+ */
+const MIN_LEAD_MINUTES = parseInt(process.env.COUPON_MIN_LEAD_MINUTES || '30', 10);
+
 /** Décalage (minutes) du fuseau par rapport à UTC à l'instant donné. */
 function tzOffsetMinutes(date: Date, timeZone: string): number {
   try {
@@ -63,6 +73,8 @@ function startOfZonedDay(date: Date, timeZone: string): number {
 
 export interface DayWindow {
   timeZone: string;
+  /** Marge de sécurité avant le coup d'envoi (minutes). */
+  minLeadMinutes: number;
   /** Minuit local aujourd'hui. */
   todayStart: number;
   /** Minuit local demain. */
@@ -75,13 +87,14 @@ export function dayWindow(now: Date = new Date(), timeZone: string = DEFAULT_TZ)
   const todayStart = startOfZonedDay(now, timeZone);
   const tomorrowStart = startOfZonedDay(new Date(todayStart + 26 * 3600 * 1000), timeZone);
   const dayAfterStart = startOfZonedDay(new Date(tomorrowStart + 26 * 3600 * 1000), timeZone);
-  return { timeZone, todayStart, tomorrowStart, dayAfterStart };
+  return { timeZone, minLeadMinutes: MIN_LEAD_MINUTES, todayStart, tomorrowStart, dayAfterStart };
 }
 
 /**
  * Classe un coup d'envoi dans la fenêtre autorisée.
- * Un match déjà commencé (plus de 10 min) est hors fenêtre : il ne peut plus
- * être composé, même s'il figure encore dans le flux prematch.
+ *
+ * Un match déjà commencé est hors fenêtre, et un match qui démarre dans moins
+ * de `minLeadMinutes` aussi : le coupon serait périmé avant d'être collé.
  */
 export function classifyMatchDay(
   startTime: string | null | undefined,
@@ -91,7 +104,7 @@ export function classifyMatchDay(
   if (!startTime) return 'OUT_OF_WINDOW';
   const ts = Date.parse(startTime);
   if (!Number.isFinite(ts)) return 'OUT_OF_WINDOW';
-  if (ts < now - 10 * 60 * 1000) return 'OUT_OF_WINDOW';
+  if (ts < now + window.minLeadMinutes * 60 * 1000) return 'OUT_OF_WINDOW';
   if (ts >= window.todayStart && ts < window.tomorrowStart) return 'TODAY';
   if (ts >= window.tomorrowStart && ts < window.dayAfterStart) return 'TOMORROW';
   return 'OUT_OF_WINDOW';
