@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -11,12 +12,19 @@ import '../../widgets/responsible_gambling_banner.dart';
 
 /// Écran « Combiné sur mesure ».
 ///
-/// L'utilisateur choisit le nombre de matchs et la côte totale visée ; le backend
-/// compose le combiné à partir des Value Picks (marge <= 5 %) et renvoie le code
-/// coupon MegaPari B2B + le deep link d'affiliation.
+/// L'utilisateur choisit librement :
+///   • le nombre de matchs (aucune limite produit — seule la disponibilité réelle compte),
+///   • la côte totale visée (aucune limite),
+///   • la discipline parmi les sports réels du bookmaker (ou « Tous les sports »).
 ///
-/// API : POST {base}/coupons/generate-combined
-///       GET  {base}/coupons/value-picks/availability
+/// Le backend cherche ensuite dans TOUS les marchés validés de chaque match la
+/// combinaison dont le produit des cotes est le plus proche de la cible.
+///
+/// API :
+///   GET  {base}/coupons/sports                     → sports réels + disponibilité
+///   GET  {base}/coupons/value-picks/availability   → compteurs (filtrable par sport)
+///   POST {base}/coupons/generate-combined          → composition + coupons
+///   POST {base}/coupons/pick-code                  → code d'une sélection
 class CustomCouponScreen extends StatefulWidget {
   const CustomCouponScreen({super.key});
 
@@ -36,27 +44,25 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
   String? _errorCode;
   Map<String, dynamic>? _result;
 
-  /// Codes générés à la demande, par sélection (mode PER_PICK / NONE).
+  /// Codes générés à la demande, par sélection (un coupon MegaPari = un marché).
   final Map<String, _PickCodeState> _pickCodes = {};
 
-  /// Disponibilité renvoyée par le backend (null = pas encore chargée).
-  Map<String, dynamic>? _availability;
-  bool _loadingAvailability = false;
+  /// Sports réels proposés par le bookmaker (`{id, name, events, picks, available}`).
+  List<Map<String, dynamic>> _sports = const [];
+  bool _loadingSports = false;
+  int? _selectedSportId; // null = tous les sports
+
+  /// Compteurs pour la discipline sélectionnée.
+  int? _availableEvents;
+  int? _availablePicks;
 
   static const _matchPresets = <int>[2, 3, 5, 7, 10];
-
-  /// Plafond réel imposé par le backend (MAX_COUPON_SELECTIONS), 10 par défaut.
-  int get _maxMatches {
-    final m = _availability?['max_matches'];
-    if (m is int && m > 0) return m;
-    return AppConfig.maxMatches;
-  }
-  static const _oddsPresets = <double>[2.0, 2.5, 5.0, 10.0, 25.0];
+  static const _oddsPresets = <double>[2.0, 2.5, 5.0, 10.0, 25.0, 50.0];
 
   @override
   void initState() {
     super.initState();
-    _loadAvailability();
+    _loadAll();
   }
 
   @override
@@ -70,29 +76,69 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
 
   // ---------------------------------------------------------------- réseau --
 
-  Uri _uri(String path) => Uri.parse('${AppConfig.effectiveApiBase}$path');
+  Uri _uri(String path, [Map<String, String>? query]) =>
+      Uri.parse('${AppConfig.effectiveApiBase}$path').replace(queryParameters: query);
 
-  Future<void> _loadAvailability() async {
-    setState(() => _loadingAvailability = true);
+  Future<void> _loadAll() async {
+    await Future.wait([_loadSports(), _loadAvailability()]);
+  }
+
+  Future<void> _loadSports() async {
+    setState(() => _loadingSports = true);
     try {
       final res = await http
-          .get(_uri('/coupons/value-picks/availability'), headers: const {'Accept': 'application/json'})
-          .timeout(const Duration(seconds: 12));
+          .get(_uri('/coupons/sports'), headers: const {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 20));
       if (!mounted) return;
       if (res.statusCode >= 200 && res.statusCode < 300) {
-        final data = jsonDecode(res.body);
-        if (data is Map<String, dynamic>) {
+        final decoded = jsonDecode(res.body);
+        final list = (decoded is Map && decoded['sports'] is List) ? decoded['sports'] as List : const [];
+        setState(() {
+          _sports = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+          _loadingSports = false;
+        });
+        return;
+      }
+      setState(() => _loadingSports = false);
+    } catch (_) {
+      if (mounted) setState(() => _loadingSports = false);
+    }
+  }
+
+  Future<void> _loadAvailability() async {
+    try {
+      final res = await http
+          .get(
+            _uri('/coupons/value-picks/availability',
+                _selectedSportId != null ? {'sport_id': '$_selectedSportId'} : null),
+            headers: const {'Accept': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted) return;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        final decoded = jsonDecode(res.body);
+        if (decoded is Map<String, dynamic>) {
           setState(() {
-            _availability = data;
-            _loadingAvailability = false;
+            _availableEvents = (decoded['events'] is num) ? (decoded['events'] as num).toInt() : null;
+            _availablePicks = (decoded['picks'] is num) ? (decoded['picks'] as num).toInt() : null;
           });
-          return;
         }
       }
-      setState(() => _loadingAvailability = false);
     } catch (_) {
-      if (mounted) setState(() => _loadingAvailability = false);
+      /* disponibilité purement indicative : l'échec ne bloque pas la saisie */
     }
+  }
+
+  Future<void> _onSportChanged(int? sportId) async {
+    setState(() {
+      _selectedSportId = sportId;
+      _result = null;
+      _error = null;
+      _pickCodes.clear();
+      _availableEvents = null;
+      _availablePicks = null;
+    });
+    await _loadAvailability();
   }
 
   Future<void> _generate() async {
@@ -118,9 +164,10 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
             body: jsonEncode({
               'num_matches': numMatches,
               'target_total_odds': targetOdds,
+              if (_selectedSportId != null) 'sport_id': _selectedSportId,
             }),
           )
-          .timeout(const Duration(seconds: 45));
+          .timeout(const Duration(seconds: 60));
 
       final decoded = _safeDecode(res.body);
 
@@ -129,9 +176,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
           _result = decoded;
           _loading = false;
         });
-        // Erreur uniquement quand la création du coupon (mono-sélection) échoue :
-        // en mode composition (N > 1) l'absence de code n'est pas une erreur.
-        if (decoded['success'] == false && decoded['couponMode'] == 'SINGLE') {
+        final mode = (decoded['couponMode'] ?? '').toString();
+        if (decoded['success'] == false && mode == 'SINGLE') {
           setState(() {
             _errorCode = 'B2B_UNAVAILABLE';
             _error = (decoded['message'] ?? 'Coupon non généré par MegaPari.').toString();
@@ -152,6 +198,44 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         _error = 'Connexion impossible. Vérifie ta connexion puis réessaie.\n($e)';
         _loading = false;
       });
+    }
+  }
+
+  /// Génère le code coupon d'une sélection (MegaPari : 1 coupon = 1 marché).
+  Future<void> _fetchPickCode(String eventId, String selectionId) async {
+    final key = '$eventId|$selectionId';
+    if (_pickCodes[key]?.loading == true) return;
+    setState(() => _pickCodes[key] = const _PickCodeState(loading: true));
+
+    try {
+      final res = await http
+          .post(
+            _uri('/coupons/pick-code'),
+            headers: const {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: jsonEncode({'event_id': eventId, 'selection_id': selectionId}),
+          )
+          .timeout(const Duration(seconds: 50));
+
+      final decoded = _safeDecode(res.body);
+      if (res.statusCode >= 200 && res.statusCode < 300 && decoded is Map<String, dynamic>) {
+        final code = decoded['couponCode']?.toString();
+        setState(() => _pickCodes[key] = _PickCodeState(
+              code: code,
+              deepLink: decoded['deepLink']?.toString(),
+            ));
+        if (code != null) {
+          await Clipboard.setData(ClipboardData(text: code));
+          _snack(Localizations.localeOf(context).languageCode == 'fr'
+              ? 'Code $code copié ✓'
+              : 'Code $code copied ✓');
+        }
+        return;
+      }
+
+      final code = _extractReasonCode(decoded);
+      setState(() => _pickCodes[key] = _PickCodeState(error: _humanError(code, decoded)));
+    } catch (e) {
+      setState(() => _pickCodes[key] = _PickCodeState(error: 'Réseau : $e'));
     }
   }
 
@@ -178,16 +262,13 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
   String _humanError(String? code, dynamic decoded) {
     switch (code) {
       case 'NO_VALUE_PICKS':
-        return 'Aucune Value Pick disponible pour le moment (marge > ${_marginText()} %). '
-            'Lance un scan des marchés, puis réessaie dans quelques minutes.';
+        return _selectedSportId != null
+            ? 'Aucun match disponible dans cette discipline pour l\'instant. Choisis « Tous les sports » ou réessaie plus tard.'
+            : 'Aucune Value Pick disponible (marge au-dessus du seuil). Lance un scan puis réessaie dans quelques minutes.';
       case 'NOT_ENOUGH_EVENTS':
         final d = (decoded is Map) ? decoded['details'] : null;
-        final available = (d is Map ? d['available'] : null) ?? _availability?['events'] ?? '?';
-        return 'Pas assez de matchs éligibles : $available disponibles. Réduis le nombre de matchs.';
-      case 'TOO_MANY_MATCHES':
-        final d = (decoded is Map) ? decoded['details'] : null;
-        final max = (d is Map ? d['max'] : null) ?? AppConfig.maxMatches;
-        return 'Nombre de matchs trop élevé (maximum $max par coupon).';
+        final available = (d is Map ? d['available'] : null) ?? _availableEvents ?? '?';
+        return 'Pas assez de matchs disponibles : $available seulement. Réduis le nombre de matchs ou change de discipline.';
       case 'INVALID_TARGET_ODDS':
         return 'La côte totale visée doit être supérieure ou égale à 1.01.';
       case 'INVALID_NUM_MATCHES':
@@ -196,15 +277,14 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         final d = (decoded is Map) ? decoded['details'] : null;
         final retry = (d is Map && d['retry_after_seconds'] is num)
             ? (d['retry_after_seconds'] as num).toInt()
-            : 90;
+            : 60;
         return 'MegaPari limite temporairement la création de codes coupon. Réessaie dans $retry secondes.';
       case 'SELECTION_NOT_AVAILABLE':
         return 'Cette sélection n\'est plus disponible (cote changée ou marché fermé). Relance la composition.';
       case 'B2B_UNAVAILABLE':
       case 'B2B_COUPON_FAILED':
       case 'B2B_SHARECOUPON_ERROR':
-        return 'La composition est prête mais MegaPari n\'a pas validé le coupon. '
-            'Les cotes ont peut-être bougé : réessaie dans un instant.';
+        return 'La composition est prête mais MegaPari n\'a pas validé le coupon. Les cotes ont peut-être bougé : réessaie dans un instant.';
       case 'PROVIDER_NOT_SUPPORTED':
         return 'Seul MegaPari est disponible pour la génération de coupons.';
       default:
@@ -213,31 +293,27 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     }
   }
 
-  String _marginText() {
-    final m = _availability?['margin_threshold'];
-    if (m is num) return m.toStringAsFixed(0);
-    return '5';
-  }
-
   // -------------------------------------------------------------- helpers ---
 
   static double _parseOdds(String raw) => double.parse(raw.trim().replaceAll(',', '.'));
 
+  /// Cote moyenne nécessaire par match pour atteindre la cible.
   String get _hintPerMatch {
     final n = int.tryParse(_numCtrl.text.trim());
     final t = double.tryParse(_oddsCtrl.text.trim().replaceAll(',', '.'));
     if (n == null || n < 1 || t == null || t <= 0) return '—';
-    return math.pow(t, 1 / n).toDouble().toStringAsFixed(2);
+    final per = math.pow(t, 1 / n).toDouble();
+    if (!per.isFinite) return '—';
+    return per.toStringAsFixed(2);
   }
 
   bool get _canGenerate {
     if (_loading) return false;
     final n = int.tryParse(_numCtrl.text.trim());
     final t = double.tryParse(_oddsCtrl.text.trim().replaceAll(',', '.'));
-    if (n == null || n < AppConfig.minMatches || n > _maxMatches) return false;
-    if (t == null || t < AppConfig.minOdds || t > AppConfig.maxOdds) return false;
-    final available = _availability?['events'];
-    if (available is int && available < n) return false;
+    if (n == null || n < 1) return false;
+    if (t == null || t < 1.01) return false;
+    if (_availableEvents != null && _availableEvents! > 0 && n > _availableEvents!) return false;
     return true;
   }
 
@@ -249,6 +325,14 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
   void _setOdds(double o) {
     setState(() => _oddsCtrl.text = o == o.roundToDouble() ? o.toStringAsFixed(0) : o.toString());
     _formKey.currentState?.validate();
+  }
+
+  String get _selectedSportLabel {
+    if (_selectedSportId == null) return 'Tous les sports';
+    for (final s in _sports) {
+      if (s['id'] == _selectedSportId) return (s['name'] ?? '').toString();
+    }
+    return 'Tous les sports';
   }
 
   // ----------------------------------------------------------------- build --
@@ -263,9 +347,9 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         title: Text(isFr ? 'Combiné sur mesure' : 'Custom accumulator'),
         actions: [
           IconButton(
-            tooltip: isFr ? 'Actualiser la disponibilité' : 'Refresh availability',
-            onPressed: _loadingAvailability ? null : _loadAvailability,
-            icon: _loadingAvailability
+            tooltip: isFr ? 'Actualiser' : 'Refresh',
+            onPressed: _loadingSports ? null : _loadAll,
+            icon: _loadingSports
                 ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.refresh),
           ),
@@ -293,8 +377,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               const SizedBox(height: 16),
               Text(
                 isFr
-                    ? 'Fail-Closed : si une cote est bloquée ou si la marge dépasse le seuil au moment de l\'envoi, aucun coupon n\'est généré.'
-                    : 'Fail-Closed: if a market is suspended or the margin exceeds the threshold at sending time, no coupon is generated.',
+                    ? 'Le moteur parcourt tous les marchés validés de chaque match (marge ≤ seuil) et retient la sélection qui rapproche le plus le combiné de ta côte cible. Aucune limite de matchs ni de cote.'
+                    : 'The engine scans every validated market of each match (margin ≤ threshold) and keeps the selection that brings the accumulator closest to your target odds. No match or odds limit.',
                 style: TextStyle(fontSize: 10.5, color: Colors.grey[600], height: 1.35),
                 textAlign: TextAlign.center,
               ),
@@ -308,34 +392,32 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
   // ------------------------------------------------------------- sections ---
 
   Widget _availabilityBanner(bool isFr, ColorScheme cs) {
-    final events = _availability?['events'];
-    final picks = _availability?['picks'];
-    final maxMatches = _availability?['max_matches'] ?? AppConfig.maxMatches;
-
     final String text;
     final Color color;
     final IconData icon;
 
-    if (_loadingAvailability) {
-      text = isFr ? 'Analyse des marchés en cours…' : 'Scanning markets…';
+    if (_loadingSports) {
+      text = isFr ? 'Chargement des disciplines…' : 'Loading sports…';
       color = cs.primary;
       icon = Icons.hourglass_top;
-    } else if (events is int) {
-      if (events == 0) {
+    } else if (_availableEvents != null) {
+      if (_availableEvents == 0) {
         text = isFr
-            ? 'Aucun match éligible pour l\'instant (marge ≤ ${_marginText()} %).'
-            : 'No eligible match right now (margin ≤ ${_marginText()} %).';
+            ? 'Aucun match éligible dans « $_selectedSportLabel » pour l\'instant.'
+            : 'No eligible match in “$_selectedSportLabel” right now.';
         color = Colors.orange;
         icon = Icons.info_outline;
       } else {
         text = isFr
-            ? '$events matchs éligibles • $picks sélections value (max $maxMatches matchs/coupon)'
-            : '$events eligible matches • $picks value selections (max $maxMatches matches/coupon)';
+            ? '$_availableEvents matchs · $_availablePicks sélections disponibles dans « $_selectedSportLabel »'
+            : '$_availableEvents matches · $_availablePicks selections in “$_selectedSportLabel”';
         color = Colors.green;
         icon = Icons.check_circle_outline;
       }
     } else {
-      text = isFr ? 'Disponibilité indisponible — tu peux tout de même essayer.' : 'Availability unavailable — you can still try.';
+      text = isFr
+          ? 'Disponibilité inconnue — tu peux tout de même générer.'
+          : 'Availability unknown — you can still generate.';
       color = Colors.grey;
       icon = Icons.cloud_off;
     }
@@ -352,11 +434,108 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
           Icon(icon, size: 18, color: color),
           const SizedBox(width: 10),
           Expanded(
-            child: Text(text, style: TextStyle(fontSize: 12.5, color: color, fontWeight: FontWeight.w600)),
+            child: Text(
+              text,
+              style: TextStyle(fontSize: 12.5, color: color, fontWeight: FontWeight.w600),
+            ),
           ),
         ],
       ),
     );
+  }
+
+  Widget _sportSelector(bool isFr, ColorScheme cs) {
+    final items = <DropdownMenuItem<int?>>[
+      DropdownMenuItem<int?>(
+        value: null,
+        child: Row(
+          children: [
+            const Icon(Icons.public, size: 18),
+            const SizedBox(width: 8),
+            Text(isFr ? 'Tous les sports' : 'All sports', style: const TextStyle(fontSize: 13.5)),
+          ],
+        ),
+      ),
+      ..._sports.map((s) {
+        final id = s['id'] is num ? (s['id'] as num).toInt() : null;
+        final name = (s['name'] ?? '').toString();
+        final events = s['events'] is num ? (s['events'] as num).toInt() : 0;
+        final available = s['available'] == true || events > 0;
+        return DropdownMenuItem<int?>(
+          value: id,
+          child: Row(
+            children: [
+              Icon(
+                _sportIcon(name),
+                size: 18,
+                color: available ? cs.primary : Colors.grey,
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  available ? '$name ($events)' : name,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    color: available ? null : Colors.grey,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }),
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          isFr ? 'Discipline' : 'Sport',
+          style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: Colors.grey[700]),
+        ),
+        const SizedBox(height: 6),
+        DropdownButtonFormField<int?>(
+          value: _selectedSportId,
+          isExpanded: true,
+          items: items,
+          onChanged: _loadingSports ? null : (v) => _onSportChanged(v),
+          decoration: InputDecoration(
+            prefixIcon: const Icon(Icons.sports_soccer, size: 20),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(color: cs.primary, width: 1.8),
+            ),
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+            helperText: isFr
+                ? 'Sports réels proposés par le bookmaker — le combiné reste dans cette discipline.'
+                : 'Real sports offered by the bookmaker — the accumulator stays within it.',
+            helperMaxLines: 2,
+          ),
+        ),
+      ],
+    );
+  }
+
+  static IconData _sportIcon(String name) {
+    final n = name.toLowerCase();
+    if (n.contains('foot')) return Icons.sports_soccer;
+    if (n.contains('basket')) return Icons.sports_basketball;
+    if (n.contains('tennis') || n.contains('table')) return Icons.sports_tennis;
+    if (n.contains('hockey')) return Icons.sports_hockey;
+    if (n.contains('volley')) return Icons.sports_volleyball;
+    if (n.contains('handball')) return Icons.sports_handball;
+    if (n.contains('rugby') || n.contains('american')) return Icons.sports_football;
+    if (n.contains('boxe') || n.contains('mma') || n.contains('fight')) return Icons.sports_mma;
+    if (n.contains('cricket')) return Icons.sports_cricket;
+    if (n.contains('golf')) return Icons.sports_golf;
+    if (n.contains('motor') || n.contains('formula') || n.contains('racing')) return Icons.sports_motorsports;
+    if (n.contains('baseball')) return Icons.sports_baseball;
+    if (n.contains('esport') || n.contains('fifa') || n.contains('sega') || n.contains('dota')) return Icons.sports_esports;
+    return Icons.emoji_events_outlined;
   }
 
   Widget _formCard(bool isFr, ColorScheme cs) {
@@ -383,12 +562,15 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ---- Nombre de matchs ----
+              _sportSelector(isFr, cs),
+              const SizedBox(height: 16),
+
+              // ---- Nombre de matchs : LIBRE ----
               TextFormField(
                 controller: _numCtrl,
                 focusNode: _numFocus,
                 keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(2)],
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(4)],
                 textInputAction: TextInputAction.next,
                 onChanged: (_) => setState(() {}),
                 onFieldSubmitted: (_) => _oddsFocus.requestFocus(),
@@ -396,16 +578,20 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                   label: isFr ? 'Nombre de matchs' : 'Number of matches',
                   hint: '3',
                   icon: Icons.sports_soccer,
-                  helper: isFr ? 'Entre 1 et $_maxMatches matchs' : 'Between 1 and $_maxMatches',
+                  helper: _availableEvents != null
+                      ? (isFr
+                          ? 'Choisis librement — $_availableEvents matchs disponibles'
+                          : 'Choose freely — $_availableEvents matches available')
+                      : (isFr ? 'Choisis librement, sans limite' : 'Choose freely, no limit'),
                 ),
                 validator: (v) {
                   final n = int.tryParse((v ?? '').trim());
                   if (n == null) return isFr ? 'Saisis un nombre' : 'Enter a number';
-                  if (n < AppConfig.minMatches) return isFr ? 'Minimum ${AppConfig.minMatches}' : 'Min ${AppConfig.minMatches}';
-                  if (n > _maxMatches) return isFr ? 'Maximum $_maxMatches' : 'Max $_maxMatches';
-                  final available = _availability?['events'];
-                  if (available is int && available > 0 && n > available) {
-                    return isFr ? 'Seulement $available matchs disponibles' : 'Only $available matches available';
+                  if (n < 1) return isFr ? 'Au moins 1 match' : 'At least 1 match';
+                  if (_availableEvents != null && _availableEvents! > 0 && n > _availableEvents!) {
+                    return isFr
+                        ? 'Seulement $_availableEvents matchs disponibles'
+                        : 'Only $_availableEvents matches available';
                   }
                   return null;
                 },
@@ -419,7 +605,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               ),
               const SizedBox(height: 18),
 
-              // ---- Côte totale visée ----
+              // ---- Côte totale visée : LIBRE ----
               TextFormField(
                 controller: _oddsCtrl,
                 focusNode: _oddsFocus,
@@ -431,14 +617,17 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                   label: isFr ? 'Côte totale visée' : 'Target total odds',
                   hint: '2.5',
                   icon: Icons.trending_up,
-                  helper: isFr ? 'Cote par match estimée : $_hintPerMatch' : 'Estimated odds per match: $_hintPerMatch',
+                  helper: isFr
+                      ? 'Sans limite • cote moyenne par match : ×$_hintPerMatch'
+                      : 'No limit • average odds per match: ×$_hintPerMatch',
                   suffix: 'x',
                 ),
                 validator: (v) {
                   final d = double.tryParse((v ?? '').trim().replaceAll(',', '.'));
                   if (d == null) return isFr ? 'Saisis une cote' : 'Enter odds';
-                  if (d < AppConfig.minOdds) return isFr ? 'Côte minimale ${AppConfig.minOdds}' : 'Min odds ${AppConfig.minOdds}';
-                  if (d > AppConfig.maxOdds) return isFr ? 'Côte maximale ${AppConfig.maxOdds.toInt()}' : 'Max odds ${AppConfig.maxOdds.toInt()}';
+                  if (!d.isFinite || d < 1.01) {
+                    return isFr ? 'Côte minimale 1.01' : 'Minimum odds 1.01';
+                  }
                   return null;
                 },
               ),
@@ -446,14 +635,13 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               _presetChips<double>(
                 values: _oddsPresets,
                 selected: double.tryParse(_oddsCtrl.text.trim().replaceAll(',', '.')),
-                labelOf: (v) => '×${v.toStringAsFixed(v == v.roundToDouble() ? 0 : 2)}',
+                labelOf: (v) => '×${v.toStringAsFixed(v == v.roundToDouble() ? 0 : 1)}',
                 onSelected: _setOdds,
               ),
               const SizedBox(height: 14),
               _summaryStrip(isFr, cs),
               const SizedBox(height: 16),
 
-              // ---- CTA ----
               SizedBox(
                 height: 52,
                 child: FilledButton.icon(
@@ -467,7 +655,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                       : const Icon(Icons.auto_awesome),
                   label: Text(
                     _loading
-                        ? (isFr ? 'Composition et envoi à MegaPari…' : 'Building and sending to MegaPari…')
+                        ? (isFr ? 'Recherche de la meilleure combinaison…' : 'Searching best combination…')
                         : (isFr ? 'Générer le Code Coupon' : 'Generate Coupon Code'),
                     style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
                   ),
@@ -486,7 +674,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
   Widget _summaryStrip(bool isFr, ColorScheme cs) {
     final n = int.tryParse(_numCtrl.text.trim());
     final t = double.tryParse(_oddsCtrl.text.trim().replaceAll(',', '.'));
-    final valid = n != null && t != null && t >= AppConfig.minOdds;
+    final valid = n != null && t != null && t >= 1.01;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -496,13 +684,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       ),
       child: Row(
         children: [
-          Expanded(
-            child: _miniStat(
-              label: isFr ? 'Matchs' : 'Matches',
-              value: valid ? '$n' : '—',
-              cs: cs,
-            ),
-          ),
+          Expanded(child: _miniStat(label: isFr ? 'Matchs' : 'Matches', value: valid ? '$n' : '—', cs: cs)),
           Container(width: 1, height: 32, color: cs.outlineVariant),
           Expanded(
             child: _miniStat(
@@ -577,6 +759,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       ),
       isDense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+      helperMaxLines: 2,
     );
   }
 
@@ -623,48 +806,13 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     );
   }
 
-  /// Génère (à la demande) le code coupon d'une sélection.
-  /// BetB2B ne sait créer qu'un coupon par marché : chaque sélection a donc
-  /// son propre code, que l'on colle dans MegaPari avant de valider le combiné.
-  Future<void> _fetchPickCode(String eventId, String selectionId) async {
-    final key = '$eventId|$selectionId';
-    if (_pickCodes[key]?.loading == true) return;
-    setState(() => _pickCodes[key] = const _PickCodeState(loading: true));
-
-    try {
-      final res = await http
-          .post(
-            _uri('/coupons/pick-code'),
-            headers: const {'Content-Type': 'application/json', 'Accept': 'application/json'},
-            body: jsonEncode({'event_id': eventId, 'selection_id': selectionId}),
-          )
-          .timeout(const Duration(seconds: 50));
-
-      final decoded = _safeDecode(res.body);
-      if (res.statusCode >= 200 && res.statusCode < 300 && decoded is Map<String, dynamic>) {
-        final code = decoded['couponCode']?.toString();
-        final link = decoded['deepLink']?.toString();
-        setState(() => _pickCodes[key] = _PickCodeState(code: code, deepLink: link));
-        if (code != null) {
-          await Clipboard.setData(ClipboardData(text: code));
-          _snack(Localizations.localeOf(context).languageCode == 'fr'
-              ? 'Code $code copié ✓'
-              : 'Code $code copied ✓');
-        }
-        return;
-      }
-
-      final code = _extractReasonCode(decoded);
-      setState(() => _pickCodes[key] = _PickCodeState(error: _humanError(code, decoded)));
-    } catch (e) {
-      setState(() => _pickCodes[key] = _PickCodeState(error: 'Réseau : $e'));
-    }
-  }
-
   Widget _resultCard(bool isFr, ColorScheme cs) {
     final r = _result!;
     final label = (r['label'] ?? '').toString();
     final totalOdds = (r['totalOdds'] is num) ? (r['totalOdds'] as num).toDouble() : null;
+    final targetOdds = (r['targetTotalOdds'] is num) ? (r['targetTotalOdds'] as num).toDouble() : null;
+    final gap = (r['gapPercent'] is num) ? (r['gapPercent'] as num).toDouble() : null;
+    final exact = r['exact'] == true;
     final numMatches = (r['numMatches'] is num) ? (r['numMatches'] as num).toInt() : null;
     final couponCode = r['couponCode']?.toString();
     final deepLink = r['deepLink']?.toString();
@@ -704,8 +852,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                           const SizedBox(height: 2),
                           Text(
                             [
-                              if (totalOdds != null) '×${totalOdds.toStringAsFixed(2)}',
                               if (numMatches != null) '$numMatches ${isFr ? "matchs" : "matches"}',
+                              if (_selectedSportLabel.isNotEmpty) _selectedSportLabel,
                             ].join('  •  '),
                             style: TextStyle(fontSize: 12, color: Colors.grey[700]),
                           ),
@@ -714,6 +862,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 12),
+                _targetVsAchieved(isFr, cs, targetOdds: targetOdds, achieved: totalOdds, gap: gap, exact: exact),
                 const SizedBox(height: 14),
                 if (picks.isEmpty)
                   Text(
@@ -755,10 +905,60 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     );
   }
 
+  /// Bandeau « cible demandée / cote obtenue / écart ».
+  Widget _targetVsAchieved(
+    bool isFr,
+    ColorScheme cs, {
+    required double? targetOdds,
+    required double? achieved,
+    required double? gap,
+    required bool exact,
+  }) {
+    final ok = exact || (gap != null && gap <= 1.0);
+    final color = exact ? Colors.green : (ok ? Colors.green.shade600 : Colors.orange);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(exact ? Icons.check_circle : Icons.adjust, size: 20, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  exact
+                      ? (isFr ? 'Côte cible atteinte exactement' : 'Target odds matched exactly')
+                      : (isFr ? 'Cote la plus proche trouvée' : 'Closest odds found'),
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: color),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  [
+                    if (targetOdds != null) '${isFr ? "Visé" : "Target"} ×${targetOdds.toStringAsFixed(2)}',
+                    if (achieved != null) '${isFr ? "Obtenu" : "Achieved"} ×${achieved.toStringAsFixed(2)}',
+                    if (gap != null) '${isFr ? "Écart" : "Gap"} ${gap.toStringAsFixed(2)} %',
+                  ].join('   •   '),
+                  style: TextStyle(fontSize: 11.5, color: Colors.grey[800]),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _pickTile(Map<String, dynamic> p, ColorScheme cs, {required bool isFr}) {
     final home = (p['home'] ?? '').toString();
     final away = (p['away'] ?? '').toString();
     final league = (p['league'] ?? '').toString();
+    final sportName = (p['sport_name'] ?? '').toString();
     final market = (p['market_type'] ?? '').toString();
     final line = p['line'];
     final selName = (p['selection_name'] ?? '').toString();
@@ -772,6 +972,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     final title = home.isNotEmpty || away.isNotEmpty ? '$home – $away' : '#$eventId';
     final subtitleParts = <String>[
       if (league.isNotEmpty) league,
+      if (sportName.isNotEmpty) sportName,
       if (market.isNotEmpty) _marketLabel(market, line),
       if (selName.isNotEmpty) selName,
     ];
@@ -843,7 +1044,6 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
             ],
           ),
           const SizedBox(height: 6),
-          // --- Code coupon de CETTE sélection (MegaPari : 1 code par marché) ---
           if (codeState?.code != null)
             Row(
               children: [
@@ -916,7 +1116,25 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     );
   }
 
-  /// Note honnête sur la limite MegaPari : pas de code « combiné » côté B2B.
+  static String _marketLabel(String market, dynamic line) {
+    switch (market) {
+      case '1X2':
+        return '1X2';
+      case 'OVER_UNDER':
+        return line != null ? 'Plus / Moins $line' : 'Plus / Moins';
+      case 'BTTS':
+        return 'Les deux équipes marquent';
+      case 'DOUBLE_CHANCE':
+        return 'Double chance';
+      case 'HANDICAP':
+        return line != null ? 'Handicap $line' : 'Handicap';
+      case 'CORNERS_OU':
+        return line != null ? 'Corners $line' : 'Corners';
+      default:
+        return market;
+    }
+  }
+
   Widget _multiCouponNotice(bool isFr) {
     return Container(
       padding: const EdgeInsets.all(13),
@@ -947,32 +1165,13 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
           const SizedBox(height: 6),
           Text(
             isFr
-                ? 'MegaPari n\'autorise la création que d\'un code par marché. Compose ton combiné en ajoutant chaque sélection dans l\'app, ou utilise la cote et le libellé ci-dessus comme référence.'
-                : 'MegaPari only lets us create one code per market. Build your accumulator by adding each selection in the app, or use the odds and label above as reference.',
+                ? 'MegaPari n\'autorise la création que d\'un code par marché. Ajoute chaque sélection dans l\'app pour composer ton combiné, ou utilise la cote et le libellé ci-dessus comme référence.'
+                : 'MegaPari only lets us create one code per market. Add each selection in the app to build your accumulator, or use the odds and label above as reference.',
             style: TextStyle(fontSize: 11.5, height: 1.35, color: Colors.grey[800]),
           ),
         ],
       ),
     );
-  }
-
-  static String _marketLabel(String market, dynamic line) {
-    switch (market) {
-      case '1X2':
-        return '1X2';
-      case 'OVER_UNDER':
-        return line != null ? 'Plus / Moins $line' : 'Plus / Moins';
-      case 'BTTS':
-        return 'Les deux équipes marquent';
-      case 'DOUBLE_CHANCE':
-        return 'Double chance';
-      case 'HANDICAP':
-        return line != null ? 'Handicap $line' : 'Handicap';
-      case 'CORNERS_OU':
-        return line != null ? 'Corners $line' : 'Corners';
-      default:
-        return market;
-    }
   }
 
   Widget _howToCard(bool isFr) {

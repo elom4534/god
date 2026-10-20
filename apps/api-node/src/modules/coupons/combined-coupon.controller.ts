@@ -1,9 +1,10 @@
-import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query } from '@nestjs/common';
 import { CombinedCouponService } from './combined-coupon.service';
 
 interface GenerateCombinedBody {
   num_matches?: number | string;
   target_total_odds?: number | string;
+  sport_id?: number | string | null;
   currency?: string;
   language?: string;
   include_individual_codes?: boolean;
@@ -15,31 +16,41 @@ function toNumber(value: unknown): number {
   return NaN;
 }
 
+function toSportId(value: unknown): number | null {
+  if (value === undefined || value === null || value === '' || value === 'all') return null;
+  const n = toNumber(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
 @Controller('coupons')
 export class CombinedCouponController {
   constructor(private readonly svc: CombinedCouponService) {}
 
   /**
-   * Disponibilité du pool de Value Picks — permet à l'UI de borner le formulaire
-   * avant de lancer une génération (évite un aller-retour inutile).
+   * Sports réels proposés par le bookmaker (répertoire officiel) avec le nombre
+   * de matchs disponibles à cet instant. Sert à alimenter le sélecteur de
+   * discipline de l'application.
    */
+  @Get('sports')
+  async sports(@Query('language') language?: string) {
+    return this.svc.getSports(language || 'en');
+  }
+
+  /** Disponibilité du pool — borne le formulaire sans imposer de limite produit. */
   @Get('value-picks/availability')
-  async availability() {
-    const picks = await this.svc.loadValuePicks();
+  async availability(@Query('sport_id') sportId?: string) {
+    const sid = toSportId(sportId);
+    const picks = await this.svc.loadValuePicks(sid);
     const events = new Set(picks.map(p => p.event_id));
     return {
       events: events.size,
       picks: picks.length,
-      max_matches: parseInt(process.env.MAX_COUPON_SELECTIONS || '10', 10),
+      sport_id: sid,
       margin_threshold: parseFloat(process.env.MARGIN_THRESHOLD_PERCENT || '5'),
     };
   }
 
-  /**
-   * Code coupon d'une sélection de la composition (mode PER_PICK).
-   * Appelé au clic sur « Obtenir le code » d'un match — évite de saturer l'API
-   * BetB2B (1 sélection = 1 coupon) et respecte la limite de débit.
-   */
+  /** Code coupon d'une sélection de la composition (mode PER_PICK). */
   @Post('pick-code')
   @HttpCode(201)
   async pickCode(@Body() body: { event_id?: string; selection_id?: string; language?: string }) {
@@ -50,7 +61,10 @@ export class CombinedCouponController {
     );
   }
 
-  /** Combiné personnalisé : N matchs + côte totale visée → code coupon MegaPari. */
+  /**
+   * Combiné personnalisé : N matchs (libre) + côte totale visée (libre)
+   * + discipline optionnelle → composition + codes coupon MegaPari.
+   */
   @Post('generate-combined')
   @HttpCode(201)
   async generateCombined(@Body() body: GenerateCombinedBody) {
@@ -61,6 +75,7 @@ export class CombinedCouponController {
       targetOdds,
       body?.currency,
       body?.language,
+      toSportId(body?.sport_id),
       body?.include_individual_codes === true,
     );
   }

@@ -1,144 +1,154 @@
-# Écran « Combiné sur mesure » — contrat API & intégration Flutter
+# Écran « Combiné sur mesure » — contrat API & moteur de composition
 
-Écran : `apps/client-flutter/lib/features/coupons/custom_coupon_screen.dart`
-Onglet **Coupons** de l'application (remplace l'ancien écran de draft).
+Écran : `apps/client-flutter/lib/features/coupons/custom_coupon_screen.dart` (onglet **Coupons**).
+Backend : `apps/api-node/src/modules/coupons/` (NestJS) + ETL `pipelines/etl/ingest_bookmaker_markets.py`.
 
 ---
 
-## 1. Ce que fait l'écran
+## 1. Règles produit (version du 20/10/2026)
 
-1. **Formulaire** (`Form` + validation) :
-   - **Nombre de matchs** — défaut `3`, bornes `1 … max_matches`.
-   - **Côte totale visée** — défaut `2.5`, bornes `1.01 … 100000`.
-   - Raccourcis (chips) : `2 / 3 / 5 / 7 / 10` matchs, `×2 / ×2.5 / ×5 / ×10 / ×25`.
-   - Aperçu live : **cote estimée par match** = `target^(1/N)`.
-2. **CTA** « Générer le Code Coupon » avec `CircularProgressIndicator` pendant l'appel.
-3. **Résultat** : libellé `Combiné {N} matchs - Côte {Y}`, cote totale réelle, liste des
-   sélections (équipes, compétition, marché, cote, marge), puis :
-   - **1 match** → `CouponCodeCard` (code en gros, Copier, Ouvrir MegaPari) ;
-   - **N matchs** → un **bouton « Obtenir le code » par sélection** (voir §4).
-4. **Erreurs** : bandeau explicite (code raison + message actionnable + bouton Réessayer).
+| Règle | État |
+|---|---|
+| Nombre de matchs | **libre**, aucune limite produit (seule contrainte : matchs réellement disponibles) |
+| Côte totale visée | **libre**, aucune limite (≥ 1.01) |
+| Discipline | liste des **sports réels du bookmaker** (répertoire officiel), ou « Tous les sports » |
+| Recherche | sur **tous les marchés validés de chaque match** (1X2, Double chance, Handicap, Totaux, BTTS…) |
+| Résultat | cote obtenue + **écart en %** avec la cible + drapeau `exact` |
+
+Le moteur ne fabrique jamais de cote : il choisit parmi les cotes réellement proposées.
 
 ---
 
 ## 2. Endpoints
 
-### `GET /api/v1/coupons/value-picks/availability`
-Appelé à l'ouverture de l'écran — borne le formulaire avant tout appel coûteux.
+### `GET /api/v1/coupons/sports`
+Répertoire officiel (`/datafeed/directories/api/v2/sports`) enrichi du nombre de matchs disponibles.
 
 ```json
-{ "events": 10, "picks": 158, "max_matches": 10, "margin_threshold": 5 }
+{
+  "sports": [
+    { "id": 1,  "name": "Football",   "events": 167, "picks": 1987, "available": true },
+    { "id": 2,  "name": "Ice Hockey", "events": 13,  "picks": 129,  "available": true },
+    { "id": 9,  "name": "Boxing",     "events": 0,   "picks": 0,    "available": false }
+  ],
+  "total_events": 180,
+  "total_picks": 2116,
+  "margin_threshold": 5
+}
+```
+
+### `GET /api/v1/coupons/value-picks/availability?sport_id=1`
+```json
+{ "events": 167, "picks": 1987, "sport_id": 1, "margin_threshold": 5 }
 ```
 
 ### `POST /api/v1/coupons/generate-combined`
-Corps :
 ```json
-{ "num_matches": 3, "target_total_odds": 6.78 }
+{ "num_matches": 30, "target_total_odds": 1000, "sport_id": 1 }
 ```
-Champs optionnels : `language` (`en`/`fr`), `include_individual_codes` (`false` par défaut).
-
-Réponse (combiné) :
+Réponse :
 ```json
 {
   "success": true,
   "couponMode": "NONE",
-  "label": "Combiné 3 matchs - Côte 6.85",
-  "totalOdds": 6.85,
-  "numMatches": 3,
-  "targetTotalOdds": 6.78,
+  "label": "Combiné 30 matchs - Côte 1000.29",
+  "targetTotalOdds": 1000,
+  "totalOdds": 1000.29,
+  "gapPercent": 0.03,
+  "exact": false,
+  "numMatches": 30,
+  "sport": 1,
+  "sports": ["Football"],
   "couponCode": null,
   "deepLink": "https://megapari.com/en",
   "message": "Composition prête — ouvre MegaPari et ajoute les sélections.",
   "coupons": [],
-  "picks": [
-    {
-      "event_id": "761655009",
-      "home": "Sporting Clube de Portugal",
-      "away": "LASK Linz",
-      "league": "UEFA Champions League",
-      "sport": "football",
-      "start_time": "2026-10-21T19:00:00+00:00",
-      "market_type": "OVER_UNDER",
-      "market_id": "761655009_OVER_UNDER_main_3.5",
-      "selection_id": "761655009_OVER_UNDER_main_3.5_ou_over",
-      "selection_name": "Total (3.5) Over",
-      "line": 3.5,
-      "odds": 1.858,
-      "margin_percent": 1.31
-    }
-  ]
+  "picks": [ { "event_id": "…", "home": "…", "away": "…", "league": "…",
+               "sport_id": 1, "sport_name": "Football",
+               "market_type": "OVER_UNDER", "selection_name": "Total (2.5) Over",
+               "line": 2.5, "odds": 1.92, "margin_percent": 1.51 } ]
 }
 ```
 
-Réponse (1 match → vrai coupon) :
-```json
-{
-  "success": true,
-  "couponMode": "SINGLE",
-  "label": "Combiné 1 matchs - Côte 1.92",
-  "couponCode": "1RUTG",
-  "deepLink": "https://megapari.com/en?coupon-code=1RUTG",
-  "message": "Coupon généré avec succès — Code 1RUTG"
-}
-```
+`couponMode` :
+- `SINGLE` — 1 seul match : vrai code coupon + deep link pré-rempli ;
+- `NONE` — composition seule (N > 1) : l'utilisateur demande le code sélection par sélection ;
+- `PER_PICK` — codes générés côté serveur (option `include_individual_codes: true`).
 
 ### `POST /api/v1/coupons/pick-code`
-Code coupon d'**une** sélection de la composition (généré à la demande).
-
 ```json
 { "event_id": "761655009", "selection_id": "761655009_OVER_UNDER_main_3.5_ou_over" }
 ```
-→ `{ "success": true, "couponCode": "MN6TG", "deepLink": "https://megapari.com/en?coupon-code=MN6TG", "odds": 1.858, ... }`
+→ `{ "success": true, "couponCode": "MN6TG", "deepLink": "https://megapari.com/en?coupon-code=MN6TG" }`
 
 ---
 
-## 3. Composition de l'algorithme
+## 3. Moteur de composition
 
-1. Lecture du cache Margin Guard (`megapari:event:{id}`, TTL 15 min) — seules les
-   sélections de marchés **marge ≤ 5 %** sont retenues.
-2. Cible par match = `target^(1/N)`. Sélection gloutonne de l'événement le plus proche
-   **en log-cote**, puis passes d'amélioration locale (échange de sélection ou
-   d'événement) tant que l'écart diminue.
-3. Une seule sélection par match (règle stricte, vérifiée côté serveur).
+Espace logarithmique (`ln(a·b) = ln a + ln b`) : le produit des cotes devient une somme,
+ce qui rend la recherche d'une cible exacte numériquement stable.
+
+1. **Pool** : toutes les sélections des marchés validés (marge ≤ seuil) du cache
+   `megapari:event:*`, filtrées par discipline si demandée. Parcours par `SCAN`
+   (non bloquant), pas `KEYS`.
+2. **Initialisation** : cible par match = `target^(1/N)` ; on retient les N matchs dont
+   la meilleure sélection (tous marchés confondus) est la plus proche de cette valeur.
+3. **Amélioration par coordonnée** : à chaque passe, pour chaque position *i* on calcule
+   la cote idéale `cote_i × (cible / produit courant)` puis on cherche **par dichotomie**
+   la sélection la plus proche de cette cote :
+   - parmi les autres marchés du même match ;
+   - parmi les matchs non encore utilisés.
+4. **Sortie de blocage** : échange simultané de deux positions.
+5. Répétition jusqu'à stabilité, exactitude, ou `min(60, max(12, 4·N))` passes.
+
+La composition s'exécute **au clic sur « Générer »** : c'est à ce moment que tous les
+marchés disponibles de chaque match sont parcourus.
+
+### Résultats mesurés (pool réel du 20/10/2026)
+
+| Demande | Obtenu | Écart | Exact |
+|---|---|---|---|
+| 3 matchs → 6.78 | 6.78 | 0.00 % | ✅ |
+| 1 match → 2.37 | 2.37 | 0.00 % | ✅ |
+| 5 matchs → 12 | 12.00 | 0.00 % | ✅ |
+| 8 matchs → 25 | 25.12 | 0.47 % | — |
+| 12 matchs → 100 | 99.99 | 0.01 % | — |
+| 30 matchs → 1000 | 1000.29 | 0.03 % | — |
+| 50 matchs → 5000 | 5018.51 | 0.37 % | — |
+| 120 matchs → 50000 | 49800.15 | 0.40 % | — |
 
 ---
 
-## 4. Limite MegaPari (important)
+## 4. Fraîcheur du pool
 
-`sharecoupon` (BetB2B) **ne crée qu'un coupon par marché**. Il n'existe aucun endpoint
-« coupon combiné » documenté. Le produit ne fabrique donc pas de faux code combiné :
+Le cache Margin Guard a un TTL de **15 min**. Deux mécanismes le maintiennent :
 
-| Cas | Comportement |
-|-----|--------------|
-| 1 match | Vrai coupon : code + deep link pré-rempli |
-| N matchs | Composition réelle + libellé + un code **par sélection**, généré au clic |
+1. **Rafraîchissement automatique côté edge** (`apps/ml-python/app/edge.py`) :
+   l'ETL est relancé au démarrage puis toutes les **10 min** (`ETL_REFRESH_INTERVAL`),
+   en tâche de fond, sans bloquer le site.
+2. **ETL manuel** : `python pipelines/etl/ingest_bookmaker_markets.py --provider megapari --limit 400`
+   (~8 s pour 400 événements, 968 marchés validés).
 
-L'UI affiche une note explicite : *« MegaPari n'autorise la création que d'un code par marché. »*
+L'ETL interroge `Count` (max 1000) sur LoadSingle, récupère le **répertoire des sports**
+(`directories/api/v2/sports`, 33 disciplines) et étiquette chaque événement
+(`sport_id`, `sport_name`), ce qui rend le cache filtrable par discipline.
 
 ---
 
-## 5. Robustesse B2B (découverte du 20/10/2026)
+## 5. Limite MegaPari (inchangée)
+
+`sharecoupon` (BetB2B) ne crée **qu'un coupon par marché** : aucun endpoint « combiné »
+n'est documenté. Le produit ne fabrique donc pas de faux code combiné — composition
+réelle + un code par sélection, généré à la demande.
+
+---
+
+## 6. Robustesse B2B (découvertes du 20/10/2026)
 
 | Constat | Correctif |
 |---|---|
 | `getAccessToken` → HTTP 400 | décoder `&amp;` dans `client_secret` |
 | `setEx` « Invalid argument type » | signature `setEx(key, ttl, value)` |
-| `GET sharecoupon` → 400 « LiveBetService returned 200 » **alors que curl passe** | en-tête `Accept: */*` obligatoire |
-| 400 sur tous les appels pendant ~1 min | throttle 20 s entre appels + cooldown 60 s sur `B2B_RATE_LIMITED` |
-| mêmes sélections re-testées sans fin | cache coupon 15 min (clé = event + type + cote + paramètre) |
-
-Le message renvoyé à l'UI est `B2B_RATE_LIMITED` avec `details.retry_after_seconds`,
-traduit par « MegaPari limite temporairement la création de codes coupon. Réessaie dans N secondes. »
-
----
-
-## 6. Rechargement du backend
-
-L'edge FastAPI `/home/god/main.py` surveille le build NestJS :
-
-- **auto-reload** : si `dist/main.js` est plus récent que le process Node, l'edge le
-  redémarre (intervalle de chien de garde : 30 s) ;
-- **endpoint admin** : `POST /admin/reload` avec l'en-tête `X-Admin-Token: <EDGE_ADMIN_TOKEN>`
-  (`EDGE_ADMIN_TOKEN` dans `/home/god/.config/pred-app.env` ; vide = endpoint désactivé).
-
-Sans cela, un `install.sh` seul ne suffisait pas : le process Node restait sur l'ancien build.
+| `GET sharecoupon` → 400 « LiveBetService returned 200 » alors que curl passe | en-tête `Accept: */*` obligatoire |
+| 400 sur tous les appels pendant ~1 min | throttle 20 s + cooldown 60 s sur `B2B_RATE_LIMITED` |
+| mêmes sélections re-testées sans fin | cache coupon 15 min |

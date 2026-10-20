@@ -27,14 +27,24 @@ export interface ValuePick {
   tags: string[];
   line: number | null;
   odds: number;
+  logOdds: number;
   margin_percent: number;
   home: string;
   away: string;
   league: string;
   sport: string;
+  sport_id: number | null;
+  sport_name: string;
   start_time: string | null;
   b2b_type: number;
   b2b_parameter: number | null;
+}
+
+export interface ComposeOptions {
+  /** Identifiant du sport réel (répertoire bookmaker). null/undefined = tous. */
+  sportId?: number | null;
+  /** Nombre maximal d'événements lus dans le cache (garde-fou mémoire). */
+  maxEvents?: number;
 }
 
 /** Mapping tag de sélection → type BetB2B (oddsLocalization.type). */
@@ -45,9 +55,9 @@ function resolveB2bType(marketType: string, tags: string[], name: string): numbe
 
   switch (marketType) {
     case '1X2':
-      if (has('HOME') || up === '1') return 1;   // W1
-      if (has('DRAW') || up === 'X') return 2;   // X
-      if (has('AWAY') || up === '2') return 3;   // W2
+      if (has('HOME') || up === '1') return 1;
+      if (has('DRAW') || up === 'X') return 2;
+      if (has('AWAY') || up === '2') return 3;
       return 1;
     case 'DOUBLE_CHANCE':
       if (has('1X')) return 4;
@@ -56,16 +66,15 @@ function resolveB2bType(marketType: string, tags: string[], name: string): numbe
       return 4;
     case 'OVER_UNDER':
     case 'CORNERS_OU':
-      if (has('OVER') || up.startsWith('OVER')) return 9;   // Total Over
-      if (has('UNDER') || up.startsWith('UNDER')) return 10; // Total Under
+      if (has('OVER') || up.startsWith('OVER')) return 9;
+      if (has('UNDER') || up.startsWith('UNDER')) return 10;
       return 9;
     case 'BTTS':
       if (has('YES')) return 15;
       if (has('NO')) return 16;
       return 15;
     case 'HANDICAP':
-      if (has('HOME') || up.includes('1')) return 7;
-      if (has('AWAY') || up.includes('2')) return 8;
+      if (has('AWAY')) return 8;
       return 7;
     default:
       return 1;
@@ -75,23 +84,36 @@ function resolveB2bType(marketType: string, tags: string[], name: string): numbe
 @Injectable()
 export class CombinedCouponService {
   private readonly logger = new Logger(CombinedCouponService.name);
-  private readonly maxPicks = parseInt(process.env.MAX_COUPON_SELECTIONS || '10', 10);
+
+  /** Garde-fou technique uniquement (protection mémoire) — pas une limite produit. */
+  private readonly maxEventsScanned = parseInt(process.env.COUPON_MAX_EVENTS_SCANNED || '5000', 10);
   private readonly marginThreshold = parseFloat(process.env.MARGIN_THRESHOLD_PERCENT || '5');
 
   constructor(private mega: MegaPariCouponService) {}
 
+  // ------------------------------------------------------------------ pool --
+
   /**
-   * Charge le pool de Value Picks depuis Redis (cache Margin Guard 15 min).
-   * Une sélection par marché et par événement, marge <= seuil.
+   * Charge TOUTES les sélections disponibles (tous les marchés validés de chaque
+   * match), puis filtre éventuellement sur une discipline réelle.
+   *
+   * Source : cache Margin Guard (`megapari:event:*`, TTL 15 min) alimenté par l'ETL.
    */
-  async loadValuePicks(): Promise<ValuePick[]> {
+  async loadValuePicks(sportId?: number | null, maxEvents?: number): Promise<ValuePick[]> {
     const r = await getRedis();
     if (!r) return [];
 
     const picks: ValuePick[] = [];
+    const wantedSport = sportId !== undefined && sportId !== null ? Number(sportId) : null;
+    const scanLimit = Math.max(1, Math.min(maxEvents ?? this.maxEventsScanned, this.maxEventsScanned));
+
     let keys: string[] = [];
     try {
-      keys = await r.keys('megapari:event:*');
+      // SCAN (non bloquant) au lieu de KEYS : le cache peut contenir des milliers d'entrées.
+      for await (const batch of r.scanIterator({ MATCH: 'megapari:event:*', COUNT: 500 })) {
+        keys.push(...(Array.isArray(batch) ? batch : [batch]));
+        if (keys.length >= scanLimit) break;
+      }
     } catch {
       return [];
     }
@@ -107,6 +129,11 @@ export class CombinedCouponService {
       const eventId = String(data.event_id || key.replace('megapari:event:', ''));
       if (!eventId || !/^\d+$/.test(eventId)) continue;
 
+      const eventSportId =
+        typeof data.sport_id === 'number' ? data.sport_id : (String(data.sport_id || '').match(/^\d+$/) ? Number(data.sport_id) : null);
+
+      if (wantedSport !== null && eventSportId !== wantedSport) continue;
+
       const markets: any[] = Array.isArray(data.validated_markets) ? data.validated_markets : [];
       for (const vm of markets) {
         const margin = typeof vm.margin_percent === 'number' ? vm.margin_percent : null;
@@ -121,10 +148,9 @@ export class CombinedCouponService {
           const tags: string[] = Array.isArray(s.tags) ? s.tags : [];
           const name = String(s.name || '');
           const line = vm.line !== undefined && vm.line !== null ? Number(vm.line) : null;
-          // Taxonomie exacte BetB2B fournie par l'ETL (type + paramètre signé) ;
-          // fallback heuristique si l'événement vient d'un ancien cache.
           const exactType = typeof s.b2b_type === 'number' ? s.b2b_type : null;
           const exactParam = typeof s.b2b_parameter === 'number' ? s.b2b_parameter : null;
+
           picks.push({
             event_id: eventId,
             market_id: String(vm.market_id),
@@ -134,11 +160,14 @@ export class CombinedCouponService {
             tags,
             line,
             odds,
+            logOdds: Math.log(odds),
             margin_percent: margin,
             home: String(data.home_team || ''),
             away: String(data.away_team || ''),
             league: String(data.league || ''),
             sport: String(data.sport || 'football'),
+            sport_id: eventSportId,
+            sport_name: String(data.sport_name || ''),
             start_time: data.start_time ? String(data.start_time) : null,
             b2b_type: exactType ?? resolveB2bType(String(vm.market_type), tags, name),
             b2b_parameter: exactParam !== null
@@ -151,134 +180,437 @@ export class CombinedCouponService {
     return picks;
   }
 
-  /**
-   * Compose un combiné de `numMatches` sélections (1 par match) dont le produit
-   * des cotes est le plus proche possible de `targetTotalOdds`.
-   *
-   * Méthode : cible par match = target^(1/N), choix glouton de l'événement le plus
-   * proche, puis passes d'amélioration locale (remplacement d'une sélection par une
-   * autre issue d'un match non utilisé) tant que l'écart en log-cote diminue.
-   */
-  async compose(numMatches: number, targetTotalOdds: number): Promise<ValuePick[]> {
-    if (!Number.isInteger(numMatches) || numMatches < 1) {
-      throw new BadRequestException({ error: 'INVALID_INPUT', reason_code: 'INVALID_NUM_MATCHES', message: 'num_matches doit être un entier >= 1' });
-    }
-    if (numMatches > this.maxPicks) {
-      throw new BadRequestException({
-        error: 'INVALID_INPUT',
-        reason_code: 'TOO_MANY_MATCHES',
-        message: `num_matches maximum: ${this.maxPicks}`,
-        details: { max: this.maxPicks },
-      });
-    }
-    if (!isFinite(targetTotalOdds) || targetTotalOdds < 1.01) {
-      throw new BadRequestException({ error: 'INVALID_INPUT', reason_code: 'INVALID_TARGET_ODDS', message: 'target_total_odds doit être >= 1.01' });
+  /** Sports réels proposés par le bookmaker, avec le nombre de matchs disponibles. */
+  async getSports(language = 'en') {
+    const [directory, pool] = await Promise.all([
+      this.mega.getSportsDirectory(language).catch(() => [] as Array<{ id: number; name: string }>),
+      this.loadValuePicks(),
+    ]);
+
+    const counts = new Map<number, { events: Set<string>; picks: number }>();
+    for (const p of pool) {
+      if (p.sport_id === null) continue;
+      const entry = counts.get(p.sport_id) || { events: new Set<string>(), picks: 0 };
+      entry.events.add(p.event_id);
+      entry.picks += 1;
+      counts.set(p.sport_id, entry);
     }
 
-    const pool = await this.loadValuePicks();
+    // On expose tout le répertoire (l'utilisateur voit les disciplines réelles),
+    // en signalant celles qui ont des marchés disponibles à cet instant.
+    const sports = directory.map(s => {
+      const c = counts.get(s.id);
+      return {
+        id: s.id,
+        name: s.name,
+        events: c ? c.events.size : 0,
+        picks: c ? c.picks : 0,
+        available: !!c && c.events.size > 0,
+      };
+    });
+
+    // Sécurité : un sport présent dans le cache mais absent du répertoire
+    // (réponse partielle) doit quand même apparaître.
+    for (const [id, c] of counts.entries()) {
+      if (!sports.some(s => s.id === id)) {
+        const sample = pool.find(p => p.sport_id === id);
+        sports.push({
+          id,
+          name: sample?.sport_name || `Sport ${id}`,
+          events: c.events.size,
+          picks: c.picks,
+          available: true,
+        });
+      }
+    }
+
+    return {
+      sports: sports.sort((a, b) => (b.events - a.events) || a.name.localeCompare(b.name)),
+      total_events: new Set(pool.map(p => p.event_id)).size,
+      total_picks: pool.length,
+      margin_threshold: this.marginThreshold,
+    };
+  }
+
+  // --------------------------------------------------------------- compose --
+
+  /**
+   * Compose un combiné de `numMatches` sélections (1 par match) dont le produit
+   * des cotes est aussi proche que possible de `targetTotalOdds`.
+   *
+   * Aucune limite produit sur N ni sur la cote : seul le nombre de matchs
+   * réellement disponibles contraint le résultat.
+   *
+   * Algorithme (espace logarithmique, car ln(a·b) = ln a + ln b) :
+   *   1. Pour chaque match, on considère TOUTES ses sélections (tous marchés).
+   *   2. Initialisation : on retient les N matchs dont la meilleure sélection
+   *      est la plus proche de la cote cible par match (target^(1/N)).
+   *   3. Amélioration : à chaque passe, pour chaque position on calcule la
+   *      cote idéale `cote_actuelle × (cible / produit_actuel)`, puis on
+   *      cherche par dichotomie la sélection la plus proche de cette cote
+   *      (autre marché du même match, ou match non utilisé). On garde le
+   *      remplacement qui minimise l'écart final.
+   *   4. On répète jusqu'à stabilité (ou exactitude atteinte).
+   */
+  async compose(
+    numMatches: number,
+    targetTotalOdds: number,
+    options: ComposeOptions = {},
+  ): Promise<{
+    picks: ValuePick[];
+    totalOdds: number;
+    targetTotalOdds: number;
+    gapPercent: number;
+    exact: boolean;
+    candidatesEvaluated: number;
+  }> {
+    const n = Number(numMatches);
+    const target = Number(targetTotalOdds);
+
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+      throw new BadRequestException({
+        error: 'INVALID_INPUT',
+        reason_code: 'INVALID_NUM_MATCHES',
+        message: 'Le nombre de matchs doit être un entier supérieur ou égal à 1.',
+      });
+    }
+    if (!Number.isFinite(target) || target < 1.01) {
+      throw new BadRequestException({
+        error: 'INVALID_INPUT',
+        reason_code: 'INVALID_TARGET_ODDS',
+        message: 'La côte totale visée doit être supérieure ou égale à 1.01.',
+      });
+    }
+
+    const pool = await this.loadValuePicks(options.sportId ?? null);
     if (pool.length === 0) {
       throw new BadRequestException({
         error: 'NO_VALUE_PICKS',
         reason_code: 'NO_VALUE_PICKS',
-        message: 'Aucune Value Pick disponible (cache MegaPari vide ou marge > seuil). Relancez un scan.',
+        message: options.sportId
+          ? 'Aucune Value Pick disponible pour cette discipline (marge au-dessus du seuil ou aucun match à venir).'
+          : 'Aucune Value Pick disponible (cache MegaPari vide ou marge au-dessus du seuil). Lance un scan puis réessaie.',
       });
     }
 
-    // 1 sélection "représentative" par événement pour le premier passage :
-    // la plus proche de la cote cible par match.
-    const perSlot = Math.pow(targetTotalOdds, 1 / numMatches);
+    // 1 sélection par match : on indexe toutes les sélections par événement.
     const byEvent = new Map<string, ValuePick[]>();
     for (const p of pool) {
       const arr = byEvent.get(p.event_id) || [];
       arr.push(p);
       byEvent.set(p.event_id, arr);
     }
-
-    const distinctEvents = [...byEvent.keys()];
-    if (distinctEvents.length < numMatches) {
+    const events = [...byEvent.keys()];
+    if (events.length < n) {
       throw new BadRequestException({
         error: 'NOT_ENOUGH_EVENTS',
         reason_code: 'NOT_ENOUGH_EVENTS',
-        message: `Pas assez de matchs disponibles: ${distinctEvents.length} < ${numMatches}`,
-        details: { available: distinctEvents.length, requested: numMatches },
+        message: `Seulement ${events.length} match(s) disponible(s) pour cette sélection : réduis le nombre de matchs ou choisis « Tous les sports ».`,
+        details: { available: events.length, requested: n },
       });
     }
 
-    // Classement glouton : on prend les événements dont une sélection est la plus
-    // proche de la cote cible par match (en log), en évitant les doublons d'événement.
-    const logTarget = Math.log(targetTotalOdds);
-    const candidates = distinctEvents
+    const logTarget = Math.log(target);
+    const perSlot = logTarget / n;
+
+    // Sélections triées par cote croissante (pour la recherche par dichotomie).
+    for (const list of byEvent.values()) list.sort((a, b) => a.odds - b.odds);
+
+    // --- 2. Initialisation : meilleure sélection par match, matchs les mieux placés
+    const scored = events
       .map(eventId => {
-        const sels = (byEvent.get(eventId) || []).slice().sort(
-          (a, b) => Math.abs(Math.log(a.odds) - Math.log(perSlot)) - Math.abs(Math.log(b.odds) - Math.log(perSlot)),
-        );
-        return { eventId, best: sels[0], all: sels };
+        const sels = byEvent.get(eventId)!;
+        let best = sels[0];
+        let bestDiff = Math.abs(best.logOdds - perSlot);
+        for (const s of sels) {
+          const d = Math.abs(s.logOdds - perSlot);
+          if (d < bestDiff) { best = s; bestDiff = d; }
+        }
+        return { eventId, best, bestDiff, sels };
       })
-      .sort((a, b) => {
-        const da = Math.abs(Math.log(a.best.odds) - Math.log(perSlot));
-        const db = Math.abs(Math.log(b.best.odds) - Math.log(perSlot));
-        if (da !== db) return da - db;
-        // Tie-break : marge la plus faible (valeur la plus sure)
-        return a.best.margin_percent - b.best.margin_percent;
-      });
+      .sort((a, b) => (a.bestDiff - b.bestDiff) || (a.best.margin_percent - b.best.margin_percent));
 
-    const chosen: ValuePick[] = candidates.slice(0, numMatches).map(c => c.best);
+    const chosen: ValuePick[] = scored.slice(0, n).map(c => c.best);
+    const usedEvents = new Set(chosen.map(p => p.event_id));
+    const spareEvents = scored.slice(n).map(c => c.eventId);
 
-    // --- Amélioration locale : on tente de se rapprocher de la cible en log ---
-    const diff = (list: ValuePick[]) => {
-      const s = list.reduce((acc, p) => acc + Math.log(p.odds), 0);
-      return Math.abs(s - logTarget);
+    const sumLog = (list: ValuePick[]) => list.reduce((acc, p) => acc + p.logOdds, 0);
+    const gapOf = (list: ValuePick[]) => Math.abs(sumLog(list) - logTarget);
+
+    let currentGap = gapOf(chosen);
+    let evaluations = scored.reduce((acc, c) => acc + c.sels.length, 0);
+
+    /** Sélection d'un événement dont la cote est la plus proche d'une cote idéale. */
+    const closestIn = (list: ValuePick[], ideal: number): ValuePick => {
+      // list triée par cote croissante → dichotomie
+      let lo = 0;
+      let hi = list.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (list[mid].odds < ideal) lo = mid + 1; else hi = mid;
+      }
+      const candidates = [list[lo], list[Math.max(0, lo - 1)]];
+      return candidates.reduce((a, b) => (Math.abs(a.odds - ideal) <= Math.abs(b.odds - ideal) ? a : b));
     };
 
-    let currentDiff = diff(chosen);
-    const usedEvents = new Set(chosen.map(p => p.event_id));
-    const spare = candidates.slice(numMatches);
-
-    for (let pass = 0; pass < 3; pass++) {
+    // --- 3. Amélioration locale par coordonnée
+    const maxPasses = Math.min(60, Math.max(12, n * 4));
+    for (let pass = 0; pass < maxPasses && currentGap > 1e-9; pass++) {
+      const total = sumLog(chosen);
+      // Cote idéale pour la position i : celle qui annule l'écart restant.
+      const residual = logTarget - total;
       let improved = false;
-      for (let i = 0; i < chosen.length; i++) {
-        const alternatives: ValuePick[] = [];
-        // Autres sélections du même match déjà choisi
-        const sameEvent = (byEvent.get(chosen[i].event_id) || []).filter(p => p.selection_id !== chosen[i].selection_id);
-        alternatives.push(...sameEvent);
-        // Sélections d'un match non utilisé (swap d'événement)
-        for (const c of spare) {
-          if (usedEvents.has(c.eventId)) continue;
-          alternatives.push(c.best);
-        }
 
-        for (const alt of alternatives) {
-          const trial = chosen.slice();
-          trial[i] = alt;
-          // Interdit deux sélections du même match
-          if (new Set(trial.map(p => p.event_id)).size !== trial.length) continue;
-          const d = diff(trial);
-          if (d + 1e-9 < currentDiff) {
-            chosen[i] = alt;
-            currentDiff = d;
-            usedEvents.clear();
-            chosen.forEach(p => usedEvents.add(p.event_id));
-            improved = true;
-            break;
+      for (let i = 0; i < chosen.length; i++) {
+        const current = chosen[i];
+        const idealOdds = current.odds * Math.exp(residual);
+        let best: ValuePick | null = null;
+        let bestGap = currentGap;
+
+        // (a) autres marchés du même match
+        const sameEvent = byEvent.get(current.event_id) || [];
+        if (sameEvent.length > 1) {
+          const cand = closestIn(sameEvent, idealOdds);
+          evaluations += 1;
+          if (cand.selection_id !== current.selection_id) {
+            const trial = chosen.slice();
+            trial[i] = cand;
+            const g = gapOf(trial);
+            if (g < bestGap - 1e-12) { bestGap = g; best = cand; }
           }
         }
-        if (improved) break;
+
+        // (b) matchs non utilisés : on prend leur sélection la plus proche de l'idéal
+        for (const eventId of spareEvents) {
+          if (usedEvents.has(eventId)) continue;
+          const cand = closestIn(byEvent.get(eventId)!, idealOdds);
+          evaluations += 1;
+          const trial = chosen.slice();
+          trial[i] = cand;
+          const g = gapOf(trial);
+          if (g < bestGap - 1e-12) { bestGap = g; best = cand; }
+        }
+
+        if (best) {
+          chosen[i] = best;
+          currentGap = bestGap;
+          improved = true;
+          break; // on recalcule le résidu avant la position suivante
+        }
       }
-      if (!improved) break;
+
+      if (!improved) {
+        // --- 4. Sortie de blocage : échange de deux positions
+        let paired = false;
+        outer:
+        for (let i = 0; i < chosen.length && !paired; i++) {
+          const residualI = logTarget - sumLog(chosen);
+          const idealI = chosen[i].odds * Math.exp(residualI);
+          for (let j = 0; j < chosen.length; j++) {
+            if (i === j) continue;
+            const residualJ = logTarget - sumLog(chosen);
+            const idealJ = chosen[j].odds * Math.exp(residualJ);
+            const poolI = byEvent.get(chosen[i].event_id)!;
+            const poolJ = byEvent.get(chosen[j].event_id)!;
+            const ci = closestIn(poolI, idealI);
+            const cj = closestIn(poolJ, idealJ);
+            if (ci.selection_id === chosen[i].selection_id && cj.selection_id === chosen[j].selection_id) continue;
+            const trial = chosen.slice();
+            trial[i] = ci;
+            trial[j] = cj;
+            evaluations += 2;
+            const g = gapOf(trial);
+            if (g < currentGap - 1e-12) {
+              chosen[i] = ci;
+              chosen[j] = cj;
+              currentGap = g;
+              paired = true;
+              break outer;
+            }
+          }
+        }
+        if (!paired) break;
+      }
     }
 
-    return chosen.sort((a, b) => a.odds - b.odds);
+    const totalOdds = chosen.reduce((acc, p) => acc * p.odds, 1);
+    const rounded = Math.round(totalOdds * 100) / 100;
+    const targetRounded = Math.round(target * 100) / 100;
+    const gapPercent = Math.abs(totalOdds - target) / target * 100;
+
+    return {
+      picks: chosen.sort((a, b) => a.start_time && b.start_time ? a.start_time.localeCompare(b.start_time) : a.odds - b.odds),
+      totalOdds: rounded,
+      targetTotalOdds: targetRounded,
+      gapPercent: Math.round(gapPercent * 100) / 100,
+      // « exact » = la cote affichée (2 décimales) est identique à la cible affichée.
+      exact: Math.abs(rounded - targetRounded) < 0.005,
+      candidatesEvaluated: evaluations,
+    };
+  }
+
+  // ------------------------------------------------------------ génération --
+
+  /**
+   * Compose le combiné puis gère la création des codes coupon.
+   *
+   * MegaPari B2B n'accepte qu'un marché par coupon : on génère donc les codes
+   * sélection par sélection (à la demande côté client), jamais un faux combiné.
+   */
+  async generateCombined(
+    numMatches: number,
+    targetTotalOdds: number,
+    currency?: string,
+    language?: string,
+    sportId?: number | null,
+    includeIndividualCodes = false,
+  ) {
+    const composed = await this.compose(numMatches, targetTotalOdds, { sportId });
+    const picks = composed.picks;
+
+    const label = `Combiné ${picks.length} matchs - Côte ${composed.totalOdds.toFixed(2)}`;
+    const sports = [...new Set(picks.map(p => p.sport_name).filter(Boolean))];
+
+    const b2bPicks: Pick[] = picks.map(p => ({
+      event_id: p.event_id,
+      market_id: p.market_id,
+      selection_id: p.selection_id,
+      market_type: p.market_type,
+      line: p.line,
+      sportEventId: parseInt(p.event_id, 10),
+      b2b_type: p.b2b_type,
+      b2b_oddsMarket: p.odds,
+      b2b_parameter: p.b2b_parameter ?? undefined,
+      b2b_kind: 3,
+      b2b_lng: language || 'en',
+    }));
+
+    let couponMode: 'SINGLE' | 'PER_PICK' | 'NONE' = 'NONE';
+    let couponCode: string | null = null;
+    let deepLink: string | null = process.env.MEGAPARI_AFFILIATE_URL || 'https://megapari.com/en';
+    let message = 'Composition prête — ouvre MegaPari et ajoute les sélections.';
+    let success = true;
+    const coupons: Array<{
+      event_id: string;
+      home: string;
+      away: string;
+      selection_name: string;
+      market_type: string;
+      line: number | null;
+      odds: number;
+      success: boolean;
+      couponCode: string | null;
+      deepLink: string | null;
+      error: string | null;
+    }> = [];
+
+    if (b2bPicks.length === 1 || includeIndividualCodes) {
+      if (b2bPicks.length === 1) {
+        try {
+          const res = await this.mega.generateCoupon(b2bPicks, { currency, language });
+          couponMode = 'SINGLE';
+          couponCode = res.couponCode;
+          deepLink = res.deepLink;
+          message = res.message;
+          coupons.push({
+            event_id: picks[0].event_id,
+            home: picks[0].home,
+            away: picks[0].away,
+            selection_name: picks[0].selection_name,
+            market_type: picks[0].market_type,
+            line: picks[0].line,
+            odds: picks[0].odds,
+            success: true,
+            couponCode: res.couponCode,
+            deepLink: res.deepLink,
+            error: null,
+          });
+        } catch (e: any) {
+          const body = e?.getResponse?.() ?? e?.response?.data ?? null;
+          success = false;
+          message = body?.message || e?.message || 'Échec de la génération du coupon MegaPari';
+        }
+      } else {
+        const results = await this.mega.generateSeparateCoupons(b2bPicks, { currency, language });
+        couponMode = 'PER_PICK';
+        let ok = 0;
+        results.forEach((r, i) => {
+          const p = picks[i];
+          if (r.success) ok++;
+          coupons.push({
+            event_id: p.event_id,
+            home: p.home,
+            away: p.away,
+            selection_name: p.selection_name,
+            market_type: p.market_type,
+            line: p.line,
+            odds: p.odds,
+            success: r.success,
+            couponCode: r.couponCode,
+            deepLink: r.deepLink,
+            error: r.error,
+          });
+        });
+        success = ok > 0;
+        message = ok === picks.length
+          ? `${ok} codes générés — un par sélection : ajoute-les à ton coupon MegaPari.`
+          : `${ok}/${picks.length} codes générés — certains marchés ne sont plus disponibles.`;
+      }
+    }
+
+    this.logger.log(JSON.stringify({
+      level: 'audit',
+      action: 'coupons/generate-combined',
+      numMatches: picks.length,
+      targetTotalOdds: composed.targetTotalOdds,
+      achievedTotalOdds: composed.totalOdds,
+      gapPercent: composed.gapPercent,
+      exact: composed.exact,
+      sportId: sportId ?? null,
+      sports,
+      couponMode,
+      couponCode,
+      success,
+    }));
+
+    return {
+      success,
+      couponMode,
+      label,
+      // cible demandée vs cote réellement atteinte
+      targetTotalOdds: composed.targetTotalOdds,
+      totalOdds: composed.totalOdds,
+      gapPercent: composed.gapPercent,
+      exact: composed.exact,
+      numMatches: picks.length,
+      sport: sportId ?? null,
+      sports,
+      couponCode,
+      deepLink,
+      message,
+      coupons,
+      picks: picks.map(p => ({
+        event_id: p.event_id,
+        home: p.home,
+        away: p.away,
+        league: p.league,
+        sport: p.sport,
+        sport_id: p.sport_id,
+        sport_name: p.sport_name,
+        start_time: p.start_time,
+        market_type: p.market_type,
+        market_id: p.market_id,
+        selection_id: p.selection_id,
+        selection_name: p.selection_name,
+        line: p.line,
+        odds: p.odds,
+        margin_percent: p.margin_percent,
+      })),
+    };
   }
 
   /**
-   * Compose le combiné puis demande le code coupon B2B à MegaPari.
-   * Le libellé respecte le format demandé : "Combiné [X] matchs - Côte [Y]".
-   */
-  /**
    * Génère le code coupon d'UNE sélection de la composition (mode PER_PICK).
-   *
-   * On relit la Value Pick dans le cache : les cotes doivent être celles du
-   * moment (BetB2B refuse un `oddsMarket` périmé) et la marge est revérifiée.
    */
   async generatePickCode(eventId: string, selectionId: string, language?: string) {
     if (!eventId || !selectionId) {
@@ -328,8 +660,6 @@ export class CombinedCouponService {
         odds: pick.odds,
       };
     } catch (e: any) {
-      // On propage le code raison d'origine (ex. B2B_RATE_LIMITED) pour que
-      // l'application affiche un message actionnable plutôt qu'une erreur brute.
       const body = e?.getResponse?.() ?? e?.response?.data ?? null;
       const reason = typeof body?.reason_code === 'string' ? body.reason_code : 'B2B_COUPON_FAILED';
       const msg = body?.message || e?.message || 'Échec MegaPari';
@@ -341,159 +671,4 @@ export class CombinedCouponService {
       });
     }
   }
-
-  async generateCombined(
-    numMatches: number,
-    targetTotalOdds: number,
-    currency?: string,
-    language?: string,
-    includeIndividualCodes = false,
-  ) {
-    const picks = await this.compose(numMatches, targetTotalOdds);
-
-    const totalOdds = picks.reduce((acc, p) => acc * p.odds, 1);
-    const roundedOdds = Math.round(totalOdds * 100) / 100;
-    const label = `Combiné ${picks.length} matchs - Côte ${roundedOdds.toFixed(2)}`;
-
-    const b2bPicks: Pick[] = picks.map(p => ({
-      event_id: p.event_id,
-      market_id: p.market_id,
-      selection_id: p.selection_id,
-      market_type: p.market_type,
-      line: p.line,
-      sportEventId: parseInt(p.event_id, 10),
-      b2b_type: p.b2b_type,
-      b2b_oddsMarket: p.odds,
-      b2b_parameter: p.b2b_parameter ?? undefined,
-      b2b_kind: 3,
-      b2b_lng: language || 'en',
-    }));
-
-    // MegaPari B2B n'expose que `sharecoupon` : un appel = une seule sélection.
-    //  - 1 match  → un vrai coupon (code + deep link pré-remplis)
-    //  - N matchs → composition réelle + un code par sélection (mode PER_PICK),
-    //               jamais de faux « code combiné ».
-    let couponMode: 'SINGLE' | 'PER_PICK' | 'NONE' = 'NONE';
-    let couponCode: string | null = null;
-    let deepLink: string | null = null;
-    let message = '';
-    let success = false;
-    const coupons: Array<{
-      event_id: string;
-      home: string;
-      away: string;
-      selection_name: string;
-      market_type: string;
-      line: number | null;
-      odds: number;
-      success: boolean;
-      couponCode: string | null;
-      deepLink: string | null;
-      error: string | null;
-    }> = [];
-
-    if (b2bPicks.length === 1) {
-      try {
-        const res = await this.mega.generateCoupon(b2bPicks, { currency, language });
-        couponMode = 'SINGLE';
-        couponCode = res.couponCode;
-        deepLink = res.deepLink;
-        message = res.message;
-        success = true;
-        coupons.push({
-          event_id: picks[0].event_id,
-          home: picks[0].home,
-          away: picks[0].away,
-          selection_name: picks[0].selection_name,
-          market_type: picks[0].market_type,
-          line: picks[0].line,
-          odds: picks[0].odds,
-          success: true,
-          couponCode: res.couponCode,
-          deepLink: res.deepLink,
-          error: null,
-        });
-      } catch (e: any) {
-        const body = e?.response?.data ?? e?.getResponse?.() ?? null;
-        message = body?.message || e?.message || 'Échec de la génération du coupon MegaPari';
-      }
-    } else if (includeIndividualCodes) {
-      const results = await this.mega.generateSeparateCoupons(b2bPicks, { currency, language });
-      couponMode = 'PER_PICK';
-      success = results.some(r => r.success);
-      let ok = 0;
-      results.forEach((r, i) => {
-        const p = picks[i];
-        if (r.success) ok++;
-        coupons.push({
-          event_id: p.event_id,
-          home: p.home,
-          away: p.away,
-          selection_name: p.selection_name,
-          market_type: p.market_type,
-          line: p.line,
-          odds: p.odds,
-          success: r.success,
-          couponCode: r.couponCode,
-          deepLink: r.deepLink,
-          error: r.error,
-        });
-      });
-      message = ok === picks.length
-        ? `${ok} codes générés — un par sélection : ajoute-les à ton coupon MegaPari.`
-        : `${ok}/${picks.length} codes générés — certains marchés ne sont plus disponibles.`;
-      deepLink = process.env.MEGAPARI_AFFILIATE_URL || 'https://megapari.com/en';
-    } else {
-      // Mode manuel : aucune création de coupon demandée. La composition est
-      // livrée (succès), l'utilisateur génère les codes sélection par sélection.
-      couponMode = 'NONE';
-      success = true;
-      deepLink = process.env.MEGAPARI_AFFILIATE_URL || 'https://megapari.com/en';
-      message = 'Composition prête — ouvre MegaPari et ajoute les sélections.';
-    }
-
-    if (!message) message = 'Composition prête — MegaPari n\'a pas validé la génération du coupon.';
-
-    this.logger.log(JSON.stringify({
-      level: 'audit',
-      action: 'coupons/generate-combined',
-      numMatches: picks.length,
-      targetTotalOdds,
-      totalOdds: roundedOdds,
-      couponMode,
-      couponCode,
-      codesGenerated: coupons.filter(c => c.success).length,
-      success,
-    }));
-
-    return {
-      success,
-      couponMode,
-      label,
-      totalOdds: roundedOdds,
-      numMatches: picks.length,
-      targetTotalOdds,
-      couponCode,
-      deepLink,
-      message,
-      // Un code par sélection (mode PER_PICK) — vide en mode SINGLE (voir couponCode).
-      coupons,
-      picks: picks.map(p => ({
-        event_id: p.event_id,
-        home: p.home,
-        away: p.away,
-        league: p.league,
-        sport: p.sport,
-        start_time: p.start_time,
-        market_type: p.market_type,
-        market_id: p.market_id,
-        selection_id: p.selection_id,
-        selection_name: p.selection_name,
-        line: p.line,
-        odds: p.odds,
-        margin_percent: p.margin_percent,
-      })),
-    };
-  }
-
 }

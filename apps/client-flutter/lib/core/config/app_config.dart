@@ -51,11 +51,10 @@ class AppConfig {
 
   static const responsibleGamblingUrl = 'https://www.begambleaware.org/';
 
-  /// Le backend combiné est limité à [1, 20] matchs (garde-fou serveur).
+  /// Aucune limite produit sur le nombre de matchs ni sur la cote :
+  /// seule la disponibilité réelle des marchés contraint le résultat.
   static const minMatches = 1;
-  static const maxMatches = 20;
   static const minOdds = 1.01;
-  static const maxOdds = 100000.0;
 
   static bool get isProduction => effectiveApiBase.contains('alwaysdata.net');
 }

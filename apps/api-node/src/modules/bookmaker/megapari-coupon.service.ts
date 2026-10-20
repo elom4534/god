@@ -124,6 +124,44 @@ export class MegaPariCouponService {
     return token;
   }
 
+  /**
+   * Répertoire officiel des sports (noms réels proposés par le bookmaker).
+   * GET /datafeed/directories/api/v2/sports?ref=…&lng=…
+   * Cache Redis 6 h : la liste change très rarement.
+   */
+  async getSportsDirectory(language = 'en'): Promise<Array<{ id: number; name: string }>> {
+    const cacheKey = `bookmaker:sports:${this.provider}:${language}`;
+    const redis = await getRedis();
+    if (redis) {
+      const cached = await redis.get(cacheKey).catch(() => null);
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length) return parsed;
+        } catch { /* cache illisible → on retente l'appel */ }
+      }
+    }
+
+    const token = await this.getAccessToken();
+    const url = `${this.gatewayBase}/datafeed/directories/api/v2/sports`;
+    const res = await axios.get(url, {
+      params: { ref: this.cfg.ref, lng: language },
+      headers: { Authorization: `Bearer ${token}`, Accept: '*/*' },
+      timeout: 15000,
+    });
+
+    const items = Array.isArray(res.data?.items) ? res.data.items : [];
+    const sports = items
+      .filter((it: any) => it && typeof it.id === 'number' && it.name)
+      .map((it: any) => ({ id: it.id as number, name: String(it.name) }))
+      .sort((a: any, b: any) => a.name.localeCompare(b.name));
+
+    if (redis && sports.length) {
+      await redis.setEx(cacheKey, 6 * 3600, JSON.stringify(sports)).catch(() => undefined);
+    }
+    return sports;
+  }
+
   // --- B2B: GET /datafeed/directories/api/v1/sharecoupon ---
   // Docs: https://docs-marketing-sport.com → operationId GameDataFeed_Directories_API_GET_api_v1_sharecoupon
   // Params strict order: ref, oddsMarket, sportEventId, type, kind, gr, cnt, lng, partnerLink, playerId, parameter

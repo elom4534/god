@@ -117,7 +117,45 @@ def _get(token: str, path: str, params: Dict[str, Any], pause: float) -> Optiona
         return None
 
 
-def fetch_events(provider: str, token: str, limit: int) -> List[Dict[str, Any]]:
+def fetch_sports_directory(token: str, ref: int) -> Dict[int, str]:
+    """
+    Répertoire officiel des sports du bookmaker (noms réels : Football, Tennis, …).
+
+    GET /datafeed/directories/api/v2/sports?ref=…&lng=en
+    → {"items":[{"id":1,"name":"Football","maxPeriodCount":3}, …]}
+
+    Sert à étiqueter chaque événement par son sport réel, pour que l'utilisateur
+    puisse filtrer le combiné par discipline (ou rester sur « tous les sports »).
+    """
+    data = _get(token, "/datafeed/directories/api/v2/sports",
+                {"ref": ref, "lng": "en"}, pause=1)
+    directory: Dict[int, str] = {}
+    for item in (data or {}).get("items") or []:
+        try:
+            directory[int(item["id"])] = str(item["name"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    if directory:
+        print(f"   Répertoire sports → {len(directory)} disciplines")
+    return directory
+
+
+def enrich_with_sport_names(events: List[Dict[str, Any]], directory: Dict[int, str]) -> None:
+    """Ajoute `sportName` (nom réel) à chaque événement, sur place."""
+    if not directory:
+        return
+    for ev in events:
+        sid = ev.get("sportId") or ev.get("sport_id")
+        try:
+            sid_int = int(sid)
+        except (TypeError, ValueError):
+            continue
+        name = directory.get(sid_int)
+        if name:
+            ev["sportName"] = name
+
+
+def fetch_events(provider: str, token: str, limit: int, sport_ids: str = "") -> List[Dict[str, Any]]:
     """
     Charge les événements prematch avec leurs cotes.
 
@@ -128,10 +166,18 @@ def fetch_events(provider: str, token: str, limit: int) -> List[Dict[str, Any]]:
     """
     events: List[Dict[str, Any]] = []
     try:
-        data = _get(token, "/datafeed/prematch/api/v2/sportevents",
-                    {"Ref": provider_ref(provider), "Lng": "en",
-                     "SchemeOfGettingOddsOperations": "GetAllOdds"},
-                    pause=PAUSE_LIVE)
+        params = {
+            "Ref": provider_ref(provider),
+            "Lng": "en",
+            "SchemeOfGettingOddsOperations": "GetAllOdds",
+            # `Count` : nombre max d'événements renvoyés (défaut API = 100).
+            # On l'aligne sur la limite demandée pour constituer un pool large
+            # (l'utilisateur peut demander un très grand nombre de matchs).
+            "Count": str(max(1, min(limit, 1000))),
+        }
+        if sport_ids:
+            params["SportIds"] = sport_ids
+        data = _get(token, "/datafeed/prematch/api/v2/sportevents", params, pause=PAUSE_LIVE)
         if data:
             items = data.get("items") or []
             for it in items:
@@ -183,7 +229,7 @@ def provider_credentials(provider: str) -> tuple:
             os.getenv("MEGAPARI_CLIENT_SECRET", ""))
 
 
-async def run(provider: str, limit: int, dry_run: bool) -> int:
+async def run(provider: str, limit: int, dry_run: bool, sport_ids: str = "") -> int:
     client_id, client_secret = provider_credentials(provider)
     if not client_id or not client_secret:
         print(f"❌ Credentials manquantes pour {provider} "
@@ -194,7 +240,8 @@ async def run(provider: str, limit: int, dry_run: bool) -> int:
     token = get_token(client_id, client_secret)
     print("   ✅ token OAuth2 obtenu")
 
-    events = fetch_events(provider, token, limit)
+    events = fetch_events(provider, token, limit, sport_ids)
+    enrich_with_sport_names(events, fetch_sports_directory(token, provider_ref(provider)))
     if not events:
         print("   ⚠️  aucun événement exploitable — rien à traiter (fail-closed)")
         return 1
@@ -203,6 +250,10 @@ async def run(provider: str, limit: int, dry_run: bool) -> int:
     validated_total = rejected_total = 0
     for ev in events:
         adapted = adapt_betb2b_event(ev)
+        # L'adaptateur reconstruit un dict : on y reporte le nom réel du sport
+        # (répertoire officiel) pour que le cache soit filtrable par discipline.
+        if adapted and ev.get("sportName") and not adapted.get("sportName"):
+            adapted["sportName"] = ev["sportName"]
         if not adapted or not adapted.get("markets"):
             failed += 1
             continue
@@ -237,8 +288,10 @@ def main() -> int:
     parser.add_argument("--provider", default="megapari", choices=["megapari", "1xbet"])
     parser.add_argument("--limit", type=int, default=int(os.getenv("BOOKMAKER_ETL_LIMIT", "25")))
     parser.add_argument("--dry-run", action="store_true", help="affiche sans écrire dans Redis")
+    parser.add_argument("--sport-ids", default=os.getenv("BOOKMAKER_ETL_SPORT_IDS", ""),
+                        help="IDs de sports (répertoire) séparés par des virgules — vide = tous")
     args = parser.parse_args()
-    return asyncio.run(run(args.provider, args.limit, args.dry_run))
+    return asyncio.run(run(args.provider, args.limit, args.dry_run, args.sport_ids))
 
 
 if __name__ == "__main__":

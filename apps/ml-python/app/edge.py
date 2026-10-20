@@ -57,7 +57,16 @@ NODE_AUTO_RELOAD = os.getenv("NODE_AUTO_RELOAD", "true").lower() in ("1", "true"
 # Jeton d'administration (endpoint /admin/reload) — vide = endpoint désactivé.
 EDGE_ADMIN_TOKEN = os.getenv("EDGE_ADMIN_TOKEN", "").strip()
 
+# Rafraîchissement périodique du cache MegaPari (ETL) : sans cela, les Value
+# Picks expirent (TTL 15 min) et le générateur de combiné se retrouve à vide.
+ETL_REFRESH_ENABLED = os.getenv("ETL_REFRESH_ENABLED", "true").lower() in ("1", "true", "yes")
+ETL_REFRESH_INTERVAL = float(os.getenv("ETL_REFRESH_INTERVAL", "600"))
+ETL_REFRESH_LIMIT = os.getenv("ETL_REFRESH_LIMIT", "400")
+ETL_SCRIPT = os.getenv("ETL_SCRIPT", "/home/god/pred-app/pipelines/etl/ingest_bookmaker_markets.py")
+ETL_PYTHON = os.getenv("ETL_PYTHON", "/home/god/.venv/bin/python")
+
 _node_started_at: float = 0.0
+_last_etl_refresh: float = 0.0
 _base_start_time: float = time.time()
 
 # --- Redis (optionnel : l'offre Alwaysdata n'a pas de Redis managé, on
@@ -205,6 +214,10 @@ async def _startup() -> None:
     # Sur Alwaysdata il n'y a ni systemd ni superviseur : sans ce chien de garde,
     # un crash du service NestJS laisserait /api/v1/* en 502 jusqu'au redémarrage
     # du site par la plateforme.
+    if ETL_REFRESH_ENABLED:
+        global _last_etl_refresh
+        _last_etl_refresh = time.time()
+        asyncio.create_task(asyncio.to_thread(_refresh_odds_cache))
     _watchdog_task = asyncio.create_task(_watchdog())
 
 
@@ -264,11 +277,41 @@ def _reload_node(reason: str) -> bool:
     return _launch_node()
 
 
+def _refresh_odds_cache() -> None:
+    """Exécute l'ETL MegaPari (LoadSingle → Margin Guard → Redis)."""
+    script = Path(ETL_SCRIPT)
+    if not script.is_file():
+        print(f"[edge] ETL absent ({ETL_SCRIPT}) — rafraîchissement ignoré")
+        return
+    env = dict(os.environ)
+    env.setdefault("PYTHONPATH", str(script.parents[2] / "apps" / "ml-python"))
+    try:
+        proc = subprocess.run(
+            [ETL_PYTHON, str(script), "--provider", "megapari", "--limit", ETL_REFRESH_LIMIT],
+            cwd=str(script.parents[2]),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        tail = (proc.stdout or "").strip().splitlines()[-2:]
+        print(f"[edge] ETL rafraîchi (code {proc.returncode}) " + " | ".join(tail))
+        if proc.returncode != 0:
+            print(f"[edge] ETL stderr : {(proc.stderr or '')[-300:]}")
+    except Exception as e:  # pragma: no cover — ne doit jamais casser le site
+        print(f"[edge] ETL échec : {e}")
+
+
 async def _watchdog() -> None:
     """Relance les services internes (NestJS, Redis) s'ils tombent."""
     while True:
         await asyncio.sleep(WATCHDOG_INTERVAL)
         try:
+            if ETL_REFRESH_ENABLED:
+                global _last_etl_refresh
+                if time.time() - _last_etl_refresh >= ETL_REFRESH_INTERVAL:
+                    _last_etl_refresh = time.time()
+                    await asyncio.to_thread(_refresh_odds_cache)
             if await asyncio.to_thread(_node_needs_reload):
                 await asyncio.to_thread(_reload_node, "build plus récent")
                 continue

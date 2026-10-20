@@ -46,9 +46,20 @@ def extract_event_meta(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         home = {"name": home}
     if isinstance(away, str):
         away = {"name": away}
+    # Nom réel du sport tel que le bookmaker le propose (1xBet / MegaPari) :
+    # renseigné par l'ETL à partir du répertoire officiel `directories/api/v2/sports`.
+    sport_id = raw_event.get("sportId") or raw_event.get("sport_id")
+    sport_name = (
+        raw_event.get("sportName")
+        or raw_event.get("sport_name")
+        or raw_event.get("sportTitle")
+        or ""
+    )
     return {
         "event_id": str(raw_event.get("id") or raw_event.get("sportEventId") or raw_event.get("gameId") or ""),
         "sport": classify_sport(raw_event),
+        "sport_id": int(sport_id) if str(sport_id).isdigit() else None,
+        "sport_name": sport_name,
         "league": raw_event.get("leagueName") or raw_event.get("league") or raw_event.get("tournament") or "",
         "home_team": home.get("name") or home.get("title") or "",
         "away_team": away.get("name") or away.get("title") or "",

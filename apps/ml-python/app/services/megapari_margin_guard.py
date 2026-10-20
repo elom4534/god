@@ -322,6 +322,8 @@ async def process_and_cache_event(
         "rejected": rejected,
         "home_team": meta.get("home_team", ""),
         "away_team": meta.get("away_team", ""),
+        "sport_id": meta.get("sport_id"),
+        "sport_name": meta.get("sport_name", ""),
         "home_logo_url": meta.get("home_logo_url", ""),
         "away_logo_url": meta.get("away_logo_url", ""),
         "league": meta.get("league", ""),
