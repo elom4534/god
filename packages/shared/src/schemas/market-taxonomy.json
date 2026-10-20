@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "categories": {
+    "exclusive_2": ["BTTS", "OVER_UNDER", "CORNERS_OU", "SHOTS_ON_TARGET_OU", "FOULS_OU"],
+    "exclusive_3": ["1X2", "HT_1X2"],
+    "non_exclusive": ["DOUBLE_CHANCE"],
+    "handicap": ["HANDICAP", "ASIAN_HANDICAP"],
+    "reject_by_default": ["UNKNOWN", "CORRECT_SCORE_EXOTIC", "PLAYER_PROP_LOW_LIQUIDITY"]
+  },
+  "rules": {
+    "double_chance_formula": "P(1X)=P(1)+P(X), P(X2)=P(X)+P(2), P(12)=P(1)+P(2) — validate sum close to model",
+    "over_under_lines": "Each line is distinct sub-market; margin computed per line",
+    "corners_policy": "If corners history <30 matches → penalize or reject"
+  }
+}
