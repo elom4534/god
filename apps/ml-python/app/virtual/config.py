@@ -33,7 +33,7 @@ POLL_PRE_ROUND = float(os.getenv("VIRTUAL_POLL_PRE_ROUND", "10"))
 POLL_LIVE = float(os.getenv("VIRTUAL_POLL_LIVE", "10"))
 PRE_ROUND_WINDOW = float(os.getenv("VIRTUAL_PRE_ROUND_WINDOW", "120"))
 RESULTS_SWEEP = float(os.getenv("VIRTUAL_RESULTS_SWEEP", "60"))
-ODDS_SNAPSHOT_INTERVAL = float(os.getenv("VIRTUAL_ODDS_SNAPSHOT_INTERVAL", "60"))
+ODDS_SNAPSHOT_INTERVAL = float(os.getenv("VIRTUAL_ODDS_SNAPSHOT_INTERVAL", "120"))
 
 INGEST_ENABLED = os.getenv("VIRTUAL_INGEST_ENABLED", "true").lower() in ("1", "true", "yes")
 

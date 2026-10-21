@@ -73,24 +73,6 @@ _last_etl_refresh: float = 0.0
 _base_start_time: float = time.time()
 _virtual_task: Optional[asyncio.Task] = None
 
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    """Arrêt propre de l'ingestion Football Virtuel."""
-    global _virtual_task
-    if _virtual_task is not None:
-        virtual_ingestor.stop()
-        _virtual_task.cancel()
-        try:
-            await _virtual_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        _virtual_task = None
-    try:
-        await virtual_store.close()
-    except Exception:
-        pass
-
 # --- Redis (optionnel : l'offre Alwaysdata n'a pas de Redis managé, on
 #     fait tourner un Redis local compilé, supervisé par l'edge) ---------------
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
@@ -117,6 +99,24 @@ app.include_router(esports.router, prefix="/ml/v1", tags=["esports"])
 # ⚠️ Football Virtuel : routes internes ENREGISTRÉES AVANT le catch-all
 # /api/v1/{path:path} ci-dessous (sinon tout est avalé par le proxy NestJS).
 app.include_router(virtual_api.router, tags=["virtual"])
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    """Arrêt propre de l'ingestion Football Virtuel."""
+    global _virtual_task
+    if _virtual_task is not None:
+        virtual_ingestor.stop()
+        _virtual_task.cancel()
+        try:
+            await _virtual_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _virtual_task = None
+    try:
+        await virtual_store.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

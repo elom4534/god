@@ -96,6 +96,8 @@ class VirtualIngestor:
         self._seen_live: Dict[str, str] = {}
         self._tournament_ids: Dict[str, int] = {}
         self._pending_start: Dict[str, float] = {}
+        self._last_odds_state: Dict[str, Dict[tuple, Any]] = {}
+        self._last_full_snapshot: Dict[str, float] = {}
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -207,10 +209,23 @@ class VirtualIngestor:
         if not rows:
             return
         self._last_snapshot[round_id] = time.time()
+
+        # Déduplication : on n'écrit que les cotes qui ÉVOLUENT (plus un
+        # instantané complet toutes les 5 min et à chaque phase critique).
+        prev_state = self._last_odds_state.get(round_id, {})
+        heartbeat = time.time() - self._last_full_snapshot.get(round_id, 0.0) >= 300.0
+        force_full = heartbeat or soon or not prev_state or phase == "LIVE"
+        new_state: Dict[tuple, Any] = {}
         for row in rows:
-            row.update({"round_id": round_id, "phase": phase,
-                        "source_ts": now_utc, "captured_at": now_utc})
-            await store.insert_odds_snapshot(row)
+            key = (row["market"], row["selection"], row["line"])
+            new_state[key] = row["odds"]
+            if force_full or prev_state.get(key) != row["odds"]:
+                row.update({"round_id": round_id, "phase": phase,
+                            "source_ts": now_utc, "captured_at": now_utc})
+                await store.insert_odds_snapshot(row)
+        self._last_odds_state[round_id] = new_state
+        if force_full:
+            self._last_full_snapshot[round_id] = time.time()
 
     # ------------------------------------------------------------- live
     async def _handle_live(self, items: List[Dict[str, Any]], now_utc: datetime) -> None:
@@ -315,6 +330,10 @@ class VirtualIngestor:
             if finished or recorded:
                 await store.insert_live_event(round_id, None, "FULLTIME",
                                               {"score": [hg, ag], "half": half})
+                # Libération des états de snapshot du round clôturé.
+                for cache in (self._last_odds_state, self._last_full_snapshot,
+                              self._last_snapshot, self._last_scores, self._seen_live):
+                    cache.pop(round_id, None)
                 if recorded:
                     await self._apply_ratings(row["provider"], row, hg, ag, round_id)
 
