@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'core/theme/app_theme.dart';
+import 'widgets/ui_kit.dart';
 import 'features/home/home_screen.dart';
 import 'features/coupons/custom_coupon_screen.dart';
 import 'features/history/history_screen.dart';
@@ -18,7 +19,17 @@ class PredApp extends StatefulWidget {
 
 class _PredAppState extends State<PredApp> {
   Locale _locale = const Locale('fr');
-  int _nav = 0;
+  // Onglet initial : ?tab=0..3 (permet le lien direct vers un écran)
+  int _nav = _tabFromUrl();
+
+  static int _tabFromUrl() {
+    try {
+      final v = Uri.base.queryParameters['tab'];
+      final n = int.tryParse(v ?? '');
+      if (n != null && n >= 0 && n <= 3) return n;
+    } catch (_) {}
+    return 0;
+  }
 
   void setLocale(Locale l) => setState(() => _locale = l);
 
@@ -31,7 +42,7 @@ class _PredAppState extends State<PredApp> {
       SettingsScreen(currentLocale: _locale, onLocaleChange: setLocale),
     ];
     return MaterialApp(
-      title: 'Pred — 1xBet / Méga Pari',
+      title: 'Pred — MegaPari',
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
       locale: _locale,
@@ -43,15 +54,17 @@ class _PredAppState extends State<PredApp> {
       ],
       home: Scaffold(
         // IndexedStack : conserve l'état du formulaire quand on change d'onglet
-        body: IndexedStack(index: _nav, children: screens),
+        body: Responsive(
+          child: IndexedStack(index: _nav, children: screens),
+        ),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _nav,
           onDestinationSelected: (i) => setState(() => _nav = i),
           destinations: [
-            NavigationDestination(icon: Icon(Icons.home_outlined), label: _locale.languageCode=='fr' ? 'Accueil' : 'Home'),
-            NavigationDestination(icon: Icon(Icons.confirmation_number_outlined), label: _locale.languageCode=='fr' ? 'Coupons' : 'Coupons'),
-            NavigationDestination(icon: Icon(Icons.history), label: _locale.languageCode=='fr' ? 'Historique' : 'History'),
-            NavigationDestination(icon: Icon(Icons.settings_outlined), label: _locale.languageCode=='fr' ? 'Réglages' : 'Settings'),
+            NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: _locale.languageCode=='fr' ? 'Accueil' : 'Home'),
+            NavigationDestination(icon: Icon(Icons.confirmation_number_outlined), selectedIcon: Icon(Icons.confirmation_number), label: 'Coupons'),
+            NavigationDestination(icon: Icon(Icons.history_outlined), selectedIcon: Icon(Icons.history), label: _locale.languageCode=='fr' ? 'Historique' : 'History'),
+            NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: _locale.languageCode=='fr' ? 'Réglages' : 'Settings'),
           ],
         ),
       ),

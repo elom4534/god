@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../widgets/coupon_code_card.dart';
-import '../../widgets/responsible_gambling_banner.dart';
 
 /// Écran complet: Générateur → affichage Code Coupon + DeepLink MegaPari
 /// Utilise POST /api/v1/megapari/coupon/generate
@@ -53,9 +52,6 @@ class _MegaPariCouponScreenState extends State<MegaPariCouponScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const ResponsibleGamblingBanner(),
-            const SizedBox(height: 12),
-
             // Info picks
             Card(
               child: Padding(
@@ -63,13 +59,11 @@ class _MegaPariCouponScreenState extends State<MegaPariCouponScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Sélections validées (1 par match, marge ≤5%)',
+                    Text('Sélections',
                         style: TextStyle(fontWeight: FontWeight.w600, color: cs.primary)),
                     const SizedBox(height: 6),
                     Text(picksPreview, style: const TextStyle(fontSize: 13)),
                     const SizedBox(height: 6),
-                    Text('Le code sera généré via B2B MegaPari sharecoupon (ref=192) — Fail-Closed si marge >5%.',
-                        style: TextStyle(fontSize: 11, color: Colors.grey[600])),
                   ],
                 ),
               ),
@@ -82,7 +76,7 @@ class _MegaPariCouponScreenState extends State<MegaPariCouponScreen> {
               icon: loading
                   ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                   : const Icon(Icons.confirmation_number),
-              label: Text(loading ? 'Génération B2B...' : 'Générer le Code Coupon'),
+              label: Text(loading ? 'Génération…' : 'Générer le code coupon'),
               style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
             ),
 
@@ -101,42 +95,16 @@ class _MegaPariCouponScreenState extends State<MegaPariCouponScreen> {
               CouponCodeCard(
                 couponCode: couponCode!,
                 deepLink: deepLink!,
-                message: 'Coupon généré avec succès — collez ce code dans MegaPari',
+                message: 'À coller dans MegaPari → Coupon',
                 onOpen: () {
                   Clipboard.setData(ClipboardData(text: deepLink!));
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Lien copié: $deepLink — ouvrez MegaPari et collez le code $couponCode')),
+                    SnackBar(content: Text('Lien copié ✓')),
                   );
                 },
               ),
-              const SizedBox(height: 10),
-              // Instructions
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.amber.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.amber.withOpacity(0.5)),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Text('Comment utiliser:', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
-                    SizedBox(height: 6),
-                    Text('1. Copiez le code avec "Copier le code"', style: TextStyle(fontSize: 12)),
-                    Text('2. Ouvrez MegaPari via le bouton "Ouvrir MegaPari"', style: TextStyle(fontSize: 12)),
-                    Text('3. Dans MegaPari: Pari sportif → Coupon → Coller le code → Placer', style: TextStyle(fontSize: 12)),
-                  ],
-                ),
-              ),
             ],
 
-            const SizedBox(height: 14),
-            Text(
-              'Fail-Closed: si le marché est bloqué ou la marge >5% au moment du sharecoupon → aucun code généré.',
-              style: TextStyle(fontSize: 10, color: Colors.grey[600]),
-              textAlign: TextAlign.center,
-            ),
           ],
         ),
       ),

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'custom_coupon_screen.dart';
-import '../../widgets/responsible_gambling_banner.dart';
 
 class CouponScreen extends StatefulWidget {
   const CouponScreen({super.key});
@@ -18,7 +17,7 @@ class _CouponScreenState extends State<CouponScreen> {
   Future<void> generate() async {
     setState(()=> loading=true);
     await Future.delayed(Duration(seconds: 1));
-    // Mock draft — en prod: POST /api/v1/coupons/generate
+    // Mock draft
     setState((){
       draft = {
         'draft_id': 'draft_abc123',
@@ -39,7 +38,7 @@ class _CouponScreenState extends State<CouponScreen> {
   Future<void> place() async {
     setState(()=> loading=true);
     await Future.delayed(Duration(seconds: 1));
-    // Mock — en prod: POST /api/v1/bookmaker/coupon/create (revalidation marge)
+    // Mock
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Coupon placé (mock) — ticket tkt_${DateTime.now().millisecondsSinceEpoch}')));
     setState(()=> loading=false);
   }
@@ -54,8 +53,6 @@ class _CouponScreenState extends State<CouponScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ResponsibleGamblingBanner(),
-            SizedBox(height: 12),
             Text(isFr ? '1. Choisis le mode' : '1. Choose mode', style: TextStyle(fontWeight: FontWeight.bold)),
             SegmentedButton<String>(
               segments: [
@@ -82,10 +79,8 @@ class _CouponScreenState extends State<CouponScreen> {
               SizedBox(width:8),
               Expanded(child: DropdownButtonFormField<int>(value:n, items:[3,4,5].map((e)=>DropdownMenuItem(value:e, child:Text('n=$e'))).toList(), onChanged:(v)=>setState(()=>n=v!))),
             ]),
-            SizedBox(height: 8),
-            Text(isFr ? '1 seule sélection par match (strict) — validé côté serveur.' : '1 selection per match (strict) — server-side validated.', style: TextStyle(fontSize:11, color:Colors.grey)),
             SizedBox(height: 16),
-            FilledButton(onPressed: loading?null:generate, child: loading? CircularProgressIndicator(color:Colors.white): Text(isFr ? 'Générer le draft (sans cotes)' : 'Generate draft (no odds)')),
+            FilledButton(onPressed: loading?null:generate, child: loading? CircularProgressIndicator(color:Colors.white): Text(isFr ? 'Générer le draft' : 'Generate draft')),
             if(draft!=null) ...[
               SizedBox(height: 16),
               Card(
@@ -100,15 +95,11 @@ class _CouponScreenState extends State<CouponScreen> {
                       ...((draft!['selections'] as List).map((s)=> ListTile(
                         dense:true,
                         title: Text('${s['event']}'),
-                        subtitle: Text('${s['pick']} — ${(s['p_lower']*100).toStringAsFixed(1)}% borne basse — ${s['confidence']}'),
+                        subtitle: Text('${s['pick']} — ${(s['p_lower']*100).toStringAsFixed(1)}%'),
                         trailing: Icon(Icons.check_circle, color:Colors.green),
                       ))),
-                      if((draft!['warnings'] as List).isNotEmpty) Padding(padding: EdgeInsets.only(top:8), child: Text('Avertissements: ${draft!['warnings'].join(', ')}', style: TextStyle(fontSize:11, color:Colors.orange))),
                       SizedBox(height:12),
-                      ResponsibleGamblingBanner(),
-                      SizedBox(height:12),
-                      FilledButton.icon(onPressed: place, icon: Icon(Icons.send), label: Text(isFr ? 'Placer via 1xBet / Méga Pari (revalidation marge ≤5%)' : 'Place via 1xBet / Méga Pari (revalidate margin ≤5%)')),
-                      Text(isFr ? 'Revalidation fail-closed juste avant envoi — si marge >5% → rejet automatique.' : 'Fail-closed revalidation just before sending — if margin >5% → auto-reject.', style: TextStyle(fontSize:10, color:Colors.grey)),
+                      FilledButton.icon(onPressed: place, icon: Icon(Icons.send), label: Text(isFr ? 'Placer le coupon' : 'Place coupon')),
             SizedBox(height: 12),
             OutlinedButton.icon(
               onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CustomCouponScreen())),

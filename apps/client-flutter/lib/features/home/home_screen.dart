@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import '../../widgets/responsible_gambling_banner.dart';
+import '../../core/theme/app_theme.dart';
+import '../../widgets/ui_kit.dart';
 import '../../widgets/probability_card.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -49,46 +50,62 @@ class _HomeScreenState extends State<HomeScreen> {
     final isFr = Localizations.localeOf(context).languageCode == 'fr';
     return Scaffold(
       appBar: AppBar(
-        title: Text('Pred — ${isFr ? "Prédictions calibrées" : "Calibrated Predictions"}'),
+        title: Text(isFr ? 'Accueil' : 'Home'),
         actions: [
-          DropdownButton<Locale>(
-            value: Localizations.localeOf(context),
-            underline: SizedBox(),
-            icon: Icon(Icons.language),
-            onChanged: (l){ if(l!=null) widget.onLocaleChange(l); },
-            items: [
-              DropdownMenuItem(value: Locale('fr'), child: Text('FR')),
-              DropdownMenuItem(value: Locale('en'), child: Text('EN')),
-            ],
+          Container(
+            margin: const EdgeInsets.only(right: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: DropdownButton<Locale>(
+              value: Localizations.localeOf(context),
+              underline: const SizedBox(),
+              icon: const Icon(Icons.language, size: 18, color: AppColors.primary),
+              onChanged: (l){ if(l!=null) widget.onLocaleChange(l); },
+              items: const [
+                DropdownMenuItem(value: Locale('fr'), child: Text('FR', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5))),
+                DropdownMenuItem(value: Locale('en'), child: Text('EN', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5))),
+              ],
+            ),
           ),
-          SizedBox(width: 8),
         ],
       ),
       body: SingleChildScrollView(
-        padding: EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ResponsibleGamblingBanner(),
-            SizedBox(height: 12),
-            // Mode selector: Réel / Virtuel / Mix
-            SegmentedButton<String>(
-              segments: [
-                ButtonSegment(value:'real_only', label: Text(isFr ? 'Réel' : 'Real'), icon: Icon(Icons.sports_soccer)),
-                ButtonSegment(value:'virtual_only', label: Text(isFr ? 'Virtuel' : 'Virtual'), icon: Icon(Icons.videogame_asset)),
-                ButtonSegment(value:'mix', label: Text('Mix'), icon: Icon(Icons.shuffle)),
-              ],
-              selected: {mode},
-              onSelectionChanged: (v){ setState((){ mode=v.first; picksFuture=_fetchPicks(); }); },
+            // Bandeau stats du jour
+            SoftCard(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Expanded(child: StatTile(value: '76', label: isFr ? 'Picks du jour' : 'Picks today', color: AppColors.primary, leading: const IconBubble(icon: Icons.insights, size: 38, iconSize: 18))),
+                  Container(width: 1, height: 36, color: AppColors.border),
+                  Expanded(child: StatTile(value: '64', label: isFr ? 'Confiance moy.' : 'Avg. confidence', color: AppColors.green, leading: const IconBubble(icon: Icons.favorite, color: AppColors.red, size: 38, iconSize: 18))),
+                  Container(width: 1, height: 36, color: AppColors.border),
+                  Expanded(child: StatTile(value: '07:00', label: isFr ? 'Prochain scan' : 'Next scan', color: AppColors.orange, leading: const IconBubble(icon: Icons.schedule, color: AppColors.orange, size: 38, iconSize: 18))),
+                ],
+              ),
             ),
-            SizedBox(height: 8),
-            Text(isFr ? 'Tous les picks affichent la borne basse prudente (p_lower) et la confiance. Jamais de cotes.' : 'All picks show conservative lower bound (p_lower) and confidence. No odds ever.', style: TextStyle(fontSize: 12, color: Colors.grey)),
-            SizedBox(height: 12),
-            // Picks du jour (pré-calculés, cache Redis)
+            const SizedBox(height: 12),
+            // Mode selector: Réel / Virtuel / Mix
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                PillChip(label: isFr ? 'Réel' : 'Real', icon: Icons.sports_soccer, selected: mode=='real_only', activeColor: AppColors.green, onTap: (){ setState((){ mode='real_only'; picksFuture=_fetchPicks(); }); }),
+                PillChip(label: isFr ? 'Virtuel' : 'Virtual', icon: Icons.videogame_asset, selected: mode=='virtual_only', activeColor: AppColors.orange, onTap: (){ setState((){ mode='virtual_only'; picksFuture=_fetchPicks(); }); }),
+                PillChip(label: 'Mix', icon: Icons.shuffle, selected: mode=='mix', onTap: (){ setState((){ mode='mix'; picksFuture=_fetchPicks(); }); }),
+              ],
+            ),
+            const SizedBox(height: 14),
             FutureBuilder(
               future: picksFuture,
               builder: (ctx, snap) {
-                if (!snap.hasData) return Center(child: CircularProgressIndicator());
+                if (!snap.hasData) return const Center(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator()));
                 final picks = snap.data!;
                 return Column(
                   children: picks.where((p){
@@ -98,11 +115,21 @@ class _HomeScreenState extends State<HomeScreen> {
                   }).map((item){
                     final pick = item['pick'] as Map<String,dynamic>;
                     return Padding(
-                      padding: EdgeInsets.only(bottom: 10),
+                      padding: const EdgeInsets.only(bottom: 10),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          Row(children:[Chip(label: Text(item['is_virtual'] ? 'Virtuel' : 'Réel', style: TextStyle(fontSize:10)), visualDensity: VisualDensity.compact), SizedBox(width: 8), Expanded(child: Text(item['event'], style: TextStyle(fontSize:12, fontWeight: FontWeight.w600)))]),
+                          Padding(
+                            padding: const EdgeInsets.only(left: 4, bottom: 6),
+                            child: Row(children:[
+                              StatusBadge(
+                                text: item['is_virtual'] ? (isFr ? 'Virtuel' : 'Virtual') : (isFr ? 'Réel' : 'Real'),
+                                color: item['is_virtual'] ? AppColors.orange : AppColors.green,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(child: Text(item['event'], style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.ink))),
+                            ]),
+                          ),
                           ProbabilityCard(
                             title: pick['title'],
                             pLower: pick['p_lower'],
@@ -117,14 +144,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 );
               },
             ),
-            SizedBox(height: 16),
+            const SizedBox(height: 10),
             FilledButton.icon(
-              onPressed: ()=> Navigator.push(context, MaterialPageRoute(builder: (_)=> Placeholder())),
-              icon: Icon(Icons.confirmation_number),
-              label: Text(isFr ? 'Générer un coupon (sans cotes)' : 'Generate coupon (no odds)'),
+              onPressed: () {},
+              icon: const Icon(Icons.confirmation_number),
+              label: Text(isFr ? 'Générer un coupon' : 'Generate coupon'),
             ),
-            SizedBox(height: 8),
-            Text(isFr ? 'Fail-closed: si info incertaine (marge >5% ou drift), aucun pick proposé.' : 'Fail-closed: if uncertain (margin >5% or drift), no pick is suggested.', style: TextStyle(fontSize: 11, color: Colors.grey)),
           ],
         ),
       ),

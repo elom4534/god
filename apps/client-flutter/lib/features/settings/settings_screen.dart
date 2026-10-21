@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import '../../widgets/responsible_gambling_banner.dart';
+import '../../core/theme/app_theme.dart';
+import '../../widgets/ui_kit.dart';
 
 class SettingsScreen extends StatefulWidget {
   final Locale currentLocale;
@@ -18,39 +19,105 @@ class _SettingsState extends State<SettingsScreen>{
   Widget build(BuildContext context){
     final isFr = widget.currentLocale.languageCode=='fr';
     return Scaffold(
-      appBar: AppBar(title: Text(isFr ? 'Paramètres' : 'Settings')),
+      appBar: AppBar(title: Text(isFr ? 'Réglages' : 'Settings')),
       body: ListView(
-        padding: EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
         children:[
-          DropdownButtonFormField<Locale>(
-            value: widget.currentLocale,
-            decoration: InputDecoration(labelText: isFr ? 'Langue' : 'Language', border: OutlineInputBorder()),
-            items: [DropdownMenuItem(value: Locale('fr'), child: Text('Français')), DropdownMenuItem(value: Locale('en'), child: Text('English'))],
-            onChanged: (l){ if(l!=null) widget.onLocaleChange(l); },
+          SoftCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const IconBubble(icon: Icons.language, size: 36, iconSize: 17),
+                  const SizedBox(width: 10),
+                  Text(isFr ? 'Langue' : 'Language', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppColors.ink)),
+                ]),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    PillChip(label: 'Français', selected: widget.currentLocale.languageCode=='fr', onTap: () => widget.onLocaleChange(const Locale('fr'))),
+                    PillChip(label: 'English', selected: widget.currentLocale.languageCode=='en', onTap: () => widget.onLocaleChange(const Locale('en'))),
+                  ],
+                ),
+              ],
+            ),
           ),
-          SizedBox(height:12),
-          DropdownButtonFormField<String>(
-            value: country,
-            decoration: InputDecoration(labelText: isFr ? 'Pays (Country Policy Gate)' : 'Country', border: OutlineInputBorder(), helperText: 'fail-closed si non autorisé → blocage création coupon'),
-            items: ['TG','BJ','CI','FR','BE','US'].map((c)=>DropdownMenuItem(value:c, child:Text(c))).toList(),
-            onChanged:(v)=>setState(()=>country=v!),
+          const SizedBox(height: 12),
+          SoftCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const IconBubble(icon: Icons.public, color: AppColors.green, size: 36, iconSize: 17),
+                  const SizedBox(width: 10),
+                  Text(isFr ? 'Pays' : 'Country', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppColors.ink)),
+                ]),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: ['TG','BJ','CI','FR','BE','US'].map((c) => PillChip(
+                    label: c,
+                    selected: country==c,
+                    activeColor: AppColors.green,
+                    onTap: () => setState(() => country=c),
+                  )).toList(),
+                ),
+              ],
+            ),
           ),
-          SizedBox(height:12),
-          DropdownButtonFormField<String>(
-            value: risk,
-            decoration: InputDecoration(labelText: isFr ? 'Profil risque' : 'Risk profile', border: OutlineInputBorder()),
-            items: ['conservative','balanced','aggressive'].map((e)=>DropdownMenuItem(value:e, child:Text(e))).toList(),
-            onChanged:(v)=>setState(()=>risk=v!),
+          const SizedBox(height: 12),
+          SoftCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const IconBubble(icon: Icons.tune, color: AppColors.orange, size: 36, iconSize: 17),
+                  const SizedBox(width: 10),
+                  Text(isFr ? 'Profil de risque' : 'Risk profile', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppColors.ink)),
+                ]),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    PillChip(label: isFr ? 'Prudent' : 'Conservative', selected: risk=='conservative', activeColor: AppColors.green, onTap: () => setState(() => risk='conservative')),
+                    PillChip(label: isFr ? 'Équilibré' : 'Balanced', selected: risk=='balanced', activeColor: AppColors.yellow, onTap: () => setState(() => risk='balanced')),
+                    PillChip(label: isFr ? 'Dynamique' : 'Aggressive', selected: risk=='aggressive', activeColor: AppColors.red, onTap: () => setState(() => risk='aggressive')),
+                  ],
+                ),
+                const Divider(height: 24),
+                SwitchListTile(
+                  value: notif,
+                  onChanged:(v)=>setState(()=>notif=v),
+                  title: Text(isFr ? 'Notifications picks du jour' : 'Daily picks notifications', style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: AppColors.ink)),
+                  contentPadding: EdgeInsets.zero,
+                  activeColor: AppColors.primary,
+                ),
+                const SizedBox(height: 4),
+                Text(isFr ? 'Limite de mise (XOF)' : 'Stake limit (XOF)', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.ink)),
+                Slider(
+                  value: limit,
+                  min: 5000,
+                  max: 200000,
+                  divisions: 20,
+                  label: '${limit.toInt()}',
+                  activeColor: AppColors.primary,
+                  inactiveColor: AppColors.primarySoft,
+                  onChanged:(v)=>setState(()=>limit=v),
+                ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('5 000', style: const TextStyle(fontSize: 10.5, color: AppColors.muted)),
+                    Text('${limit.toInt()} XOF', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: AppColors.primary)),
+                    Text('200 000', style: const TextStyle(fontSize: 10.5, color: AppColors.muted)),
+                  ],
+                ),
+              ],
+            ),
           ),
-          SwitchListTile(value: notif, onChanged:(v)=>setState(()=>notif=v), title: Text(isFr ? 'Notifications picks du jour' : 'Daily picks notifications')),
-          SizedBox(height:12),
-          Text(isFr ? 'Limite jeu responsable (XOF)' : 'Responsible gambling limit (XOF)'),
-          Slider(value: limit, min: 5000, max: 200000, divisions: 20, label: '${limit.toInt()}', onChanged:(v)=>setState(()=>limit=v)),
-          SizedBox(height:12),
-          ResponsibleGamblingBanner(),
-          SizedBox(height:12),
-          Text('Country Policy Gate: ${country} — ${['TG','BJ','CI','FR','BE'].contains(country) ? (isFr ? 'Autorisé' : 'Allowed') : (isFr ? 'Bloqué (fail-closed)' : 'Blocked (fail-closed)')}',
-            style: TextStyle(color: ['TG','BJ','CI','FR','BE'].contains(country) ? Colors.green : Colors.red, fontWeight: FontWeight.bold)),
         ],
       ),
     );
