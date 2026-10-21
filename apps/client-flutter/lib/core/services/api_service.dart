@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import '../config/app_config.dart';
 import '../models/real_feed.dart';
+import '../models/virtual_feed.dart';
 
 /// Client unique des API réelles du moteur (NestJS).
 ///
@@ -138,6 +139,71 @@ class ApiService {
         .whereType<Map>()
         .map((e) => RealPick.fromApi(Map<String, dynamic>.from(e), isEngineChoice: false))
         .toList();
+  }
+
+  // ------------------------------------------------- Football Virtuel (réel)
+
+  /// Rounds virtuels réels (`/api/v1/virtual/rounds`).
+  static Future<List<VirtualRound>> virtualRounds({String? provider, String? status, int limit = 50}) async {
+    final d = await _get('/virtual/rounds', query: {
+      if (provider != null) 'provider': provider,
+      if (status != null) 'status': status,
+      'limit': '$limit',
+    });
+    final raw = (d['rounds'] is List) ? d['rounds'] as List : const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => VirtualRound.fromApi(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  /// Rounds à venir (`/api/v1/virtual/rounds/upcoming`).
+  static Future<List<VirtualRound>> virtualUpcoming({String? provider, int limit = 30}) async {
+    final d = await _get('/virtual/rounds/upcoming', query: {
+      if (provider != null) 'provider': provider,
+      'limit': '$limit',
+    });
+    final raw = (d['rounds'] is List) ? d['rounds'] as List : const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => VirtualRound.fromApi(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  /// Historique de cotes d'un round (`/api/v1/virtual/rounds/{id}/odds-history`).
+  static Future<List<VirtualOdd>> virtualOddsHistory(String roundId, {int limit = 500}) async {
+    final d = await _get('/virtual/rounds/$roundId/odds-history', query: {'limit': '$limit'});
+    final raw = (d['odds_history'] is List) ? d['odds_history'] as List : const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => VirtualOdd.fromApi(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  /// Derniers résultats réels (`/api/v1/virtual/results/recent`).
+  static Future<List<VirtualResult>> virtualRecentResults({String? provider, int limit = 20}) async {
+    final d = await _get('/virtual/results/recent', query: {
+      if (provider != null) 'provider': provider,
+      'limit': '$limit',
+    });
+    final raw = (d['results'] is List) ? d['results'] as List : const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => VirtualResult.fromApi(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  /// Prédiction d'un round (`/api/v1/virtual/predictions/{id}`) —
+  /// `calibration_in_progress: true` tant que l'échantillon réel est insuffisant.
+  static Future<VirtualPrediction> virtualPrediction(String roundId) async {
+    final d = await _get('/virtual/predictions/$roundId');
+    return VirtualPrediction.fromApi(d);
+  }
+
+  /// État « Fiabilité Virtuel » (`/api/v1/virtual/reliability`).
+  static Future<VirtualReliability> virtualReliability() async {
+    final d = await _get('/virtual/reliability');
+    return VirtualReliability.fromApi(d);
   }
 }
 

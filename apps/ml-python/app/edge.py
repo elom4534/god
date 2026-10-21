@@ -42,7 +42,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.routers import events, health, megapari, picks, scan, esports
+from app.routers import events, health, megapari, picks, scan, esports, virtual as virtual_api
+from app.virtual import store as virtual_store
+from app.virtual.config import INGEST_ENABLED as VIRTUAL_INGEST_ENABLED
+from app.virtual.ingestor import ingestor as virtual_ingestor
 
 NODE_API_URL = os.getenv("NODE_API_URL", "http://127.0.0.1:3000").rstrip("/")
 EDGE_STATIC_DIR = os.getenv("EDGE_STATIC_DIR", "/home/god/www/web")
@@ -68,6 +71,25 @@ ETL_PYTHON = os.getenv("ETL_PYTHON", "/home/god/.venv/bin/python")
 _node_started_at: float = 0.0
 _last_etl_refresh: float = 0.0
 _base_start_time: float = time.time()
+_virtual_task: Optional[asyncio.Task] = None
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    """Arrêt propre de l'ingestion Football Virtuel."""
+    global _virtual_task
+    if _virtual_task is not None:
+        virtual_ingestor.stop()
+        _virtual_task.cancel()
+        try:
+            await _virtual_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _virtual_task = None
+    try:
+        await virtual_store.close()
+    except Exception:
+        pass
 
 # --- Redis (optionnel : l'offre Alwaysdata n'a pas de Redis managé, on
 #     fait tourner un Redis local compilé, supervisé par l'edge) ---------------
@@ -92,6 +114,9 @@ app.include_router(scan.router, prefix="/ml/v1", tags=["scan"])
 app.include_router(picks.router, prefix="/ml/v1", tags=["picks"])
 app.include_router(megapari.router, prefix="/ml/v1", tags=["megapari"])
 app.include_router(esports.router, prefix="/ml/v1", tags=["esports"])
+# ⚠️ Football Virtuel : routes internes ENREGISTRÉES AVANT le catch-all
+# /api/v1/{path:path} ci-dessous (sinon tout est avalé par le proxy NestJS).
+app.include_router(virtual_api.router, tags=["virtual"])
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +222,14 @@ def _launch_redis() -> bool:
 
 @app.on_event("startup")
 async def _startup() -> None:
+    # Football Virtuel : ingestion en tâche de fond (flux Partner API réel).
+    # Démarrée AVANT les services optionnels — sa désactivation est explicite.
+    if VIRTUAL_INGEST_ENABLED:
+        global _virtual_task
+        _virtual_task = asyncio.create_task(virtual_ingestor.run())
+        print("[edge] ingestion Football Virtuel démarrée")
+    else:
+        print("[edge] ingestion Football Virtuel désactivée (VIRTUAL_INGEST_ENABLED=false)")
     if not NODE_AUTO_START:
         return
     if _node_is_up():

@@ -11,7 +11,7 @@ import 'features/markets/markets_screen.dart';
 import 'features/match_detail/match_detail_panel.dart';
 import 'features/performance/performance_screen.dart';
 import 'features/radar/radar_screen.dart';
-import 'features/virtual/virtual_screen.dart';
+import 'features/virtual/virtual_live_board_screen.dart';
 import 'shared/widgets/adaptive_app_shell.dart';
 import 'shared/widgets/glass_container.dart';
 
@@ -98,7 +98,7 @@ class _PredAppState extends State<PredApp> {
     final screens = [
       RadarScreen(feed: _feed, query: _query, locale: _locale, onLocaleChange: _setLocale),
       LiveScreen(feed: _feed, query: _query),
-      VirtualScreen(feed: _feed, query: _query),
+      VirtualLiveBoardScreen(query: _query),
       MarketsScreen(feed: _feed),
       PerformanceScreen(feed: _feed),
     ];
