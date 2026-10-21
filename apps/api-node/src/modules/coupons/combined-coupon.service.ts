@@ -335,6 +335,39 @@ export class CombinedCouponService {
     return result;
   }
 
+  /**
+   * Toutes les sélections validées d'UN match (tous marchés confondus),
+   * lues EN DIRECT chez MegaPari via `loadLivePicks` (aucune modification du
+   * moteur : simple filtre de lecture). Sert à la vue détaillée multi-marchés.
+   */
+  async getMatchPicks(eventId: string) {
+    const live = await this.loadLivePicks(null);
+    const picks = live.picks.filter(p => String(p.event_id) === String(eventId));
+    return {
+      event_id: String(eventId),
+      as_of: live.asOf,
+      count: picks.length,
+      picks: picks.map(p => ({
+        event_id: p.event_id,
+        home: p.home,
+        away: p.away,
+        league: p.league,
+        sport: p.sport,
+        sport_id: p.sport_id,
+        sport_name: p.sport_name,
+        start_time: p.start_time,
+        market_type: p.market_type,
+        market_id: p.market_id,
+        selection_id: p.selection_id,
+        selection_name: p.selection_name,
+        line: p.line,
+        odds: p.odds,
+        margin_percent: p.margin_percent,
+        probability_percent: Math.round(p.prob * 100),
+      })),
+    };
+  }
+
   /** Sports réels proposés par le bookmaker, avec le nombre de matchs disponibles. */
   async getSports(language = 'en') {
     const [directory, pool] = await Promise.all([

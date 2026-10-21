@@ -1,164 +1,251 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
-/// Design system « épuré » — fond lavande doux, cartes blanches arrondies,
-/// violet primaire, accents orange / jaune / vert / rouge.
-class AppColors {
-  AppColors._();
+import 'app_palette.dart';
 
-  static const bg = Color(0xFFF3F2FA);
-  static const surface = Color(0xFFFFFFFF);
-  static const ink = Color(0xFF2A2440);
-  static const muted = Color(0xFF8B87A3);
-  static const border = Color(0xFFECEAF4);
+/// Design System « Obsidian Glow » (dark) & « Pure Crystal » (light).
+///
+/// Typographie :
+///  - Interface & titres : Plus Jakarta Sans.
+///  - Scores, cotes, pourcentages IA : Space Grotesk + `FontFeature.tabularFigures()`
+///    → aucune secousse visuelle quand les valeurs rafraîchissent en direct.
+class AppFonts {
+  AppFonts._();
 
-  static const primary = Color(0xFF6C4FE8);
-  static const primarySoft = Color(0xFFEDEAFF);
+  static const tabular = [FontFeature.tabularFigures()];
 
-  static const orange = Color(0xFFFF9F43);
-  static const orangeSoft = Color(0xFFFFEEDC);
-  static const yellow = Color(0xFFFFC94D);
-  static const yellowSoft = Color(0xFFFFF6DC);
-  static const green = Color(0xFF22C97E);
-  static const greenSoft = Color(0xFFDFF6EC);
-  static const red = Color(0xFFFF5C6C);
-  static const redSoft = Color(0xFFFFE4E7);
+  /// Nombre haute précision (cotes, scores, %, chronos).
+  static TextStyle num({
+    double size = 16,
+    FontWeight weight = FontWeight.w700,
+    Color? color,
+    double? letterSpacing,
+  }) =>
+      GoogleFonts.spaceGrotesk(
+        fontSize: size,
+        fontWeight: weight,
+        color: color,
+        letterSpacing: letterSpacing,
+        fontFeatures: tabular,
+      );
+
+  /// Titre d'interface.
+  static TextStyle title({double size = 16, FontWeight weight = FontWeight.w700, Color? color}) =>
+      GoogleFonts.plusJakartaSans(fontSize: size, fontWeight: weight, color: color);
+
+  /// Libellé courant.
+  static TextStyle label({double size = 13, FontWeight weight = FontWeight.w500, Color? color}) =>
+      GoogleFonts.plusJakartaSans(fontSize: size, fontWeight: weight, color: color);
+
+  /// Légende secondaire.
+  static TextStyle caption({double size = 11, Color? color}) =>
+      GoogleFonts.plusJakartaSans(fontSize: size, fontWeight: FontWeight.w500, color: color);
 }
 
-class AppTheme {
-  static const seed = AppColors.primary;
-  static const accent = AppColors.orange;
+abstract class AppTheme {
+  /// Palette « Obsidian Glow » — noir profond bleuté, verre sombre translucide.
+  static const obsidianBg = Color(0xFF07090E);
+  static const obsidianGlass = Color(0xFF111623);
 
-  static final light = ThemeData(
-    useMaterial3: true,
-    scaffoldBackgroundColor: AppColors.bg,
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: AppColors.primary,
-      brightness: Brightness.light,
-    ).copyWith(
-      primary: AppColors.primary,
-      surface: AppColors.surface,
-      onSurface: AppColors.ink,
-    ),
-    appBarTheme: const AppBarTheme(
-      backgroundColor: AppColors.bg,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      centerTitle: false,
-      iconTheme: IconThemeData(color: AppColors.ink),
-      titleTextStyle: TextStyle(
-        color: AppColors.ink,
-        fontSize: 18,
-        fontWeight: FontWeight.w700,
-        letterSpacing: -0.2,
-      ),
-    ),
-    cardTheme: CardTheme(
-      color: AppColors.surface,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      shadowColor: AppColors.primary.withOpacity(0.08),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      margin: EdgeInsets.zero,
-    ),
-    inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: AppColors.surface,
-      hintStyle: const TextStyle(color: AppColors.muted, fontSize: 13.5),
-      labelStyle: const TextStyle(color: AppColors.muted, fontSize: 13.5),
-      helperStyle: const TextStyle(color: AppColors.muted, fontSize: 11),
-      prefixIconColor: AppColors.muted,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppColors.border),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppColors.border),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppColors.primary, width: 1.6),
-      ),
-      errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppColors.red),
-      ),
-      focusedErrorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: const BorderSide(color: AppColors.red, width: 1.6),
-      ),
-    ),
-    filledButtonTheme: FilledButtonThemeData(
-      style: FilledButton.styleFrom(
-        backgroundColor: AppColors.primary,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
-        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      ),
-    ),
-    outlinedButtonTheme: OutlinedButtonThemeData(
-      style: OutlinedButton.styleFrom(
-        foregroundColor: AppColors.primary,
-        side: const BorderSide(color: AppColors.primary, width: 1.4),
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      ),
-    ),
-    textButtonTheme: TextButtonThemeData(
-      style: TextButton.styleFrom(
-        foregroundColor: AppColors.primary,
-        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
-      ),
-    ),
-    chipTheme: ChipThemeData(
-      backgroundColor: AppColors.surface,
-      selectedColor: AppColors.primarySoft,
-      labelStyle: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.ink),
-      side: const BorderSide(color: AppColors.border),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      showCheckmark: false,
-    ),
-    navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: AppColors.surface,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      height: 66,
-      indicatorColor: AppColors.primarySoft,
-      labelTextStyle: WidgetStateProperty.resolveWith(
-        (states) => TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          color: states.contains(WidgetState.selected) ? AppColors.primary : AppColors.muted,
-        ),
-      ),
-      iconTheme: WidgetStateProperty.resolveWith(
-        (states) => IconThemeData(
-          size: 22,
-          color: states.contains(WidgetState.selected) ? AppColors.primary : AppColors.muted,
-        ),
-      ),
-    ),
-    dividerTheme: const DividerThemeData(color: AppColors.border, thickness: 1),
-    snackBarTheme: SnackBarThemeData(
-      backgroundColor: AppColors.ink,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      contentTextStyle: const TextStyle(color: Colors.white, fontSize: 13),
-    ),
-    textTheme: const TextTheme(
-      titleLarge: TextStyle(color: AppColors.ink, fontSize: 18, fontWeight: FontWeight.w700, letterSpacing: -0.2),
-      titleMedium: TextStyle(color: AppColors.ink, fontSize: 15, fontWeight: FontWeight.w700),
-      bodyMedium: TextStyle(color: AppColors.ink, fontSize: 13.5, height: 1.35),
-      bodySmall: TextStyle(color: AppColors.muted, fontSize: 11.5, height: 1.3),
-    ),
-    progressIndicatorTheme: const ProgressIndicatorThemeData(color: AppColors.primary),
+  /// Palette « Pure Crystal » — blanc nacré, surfaces blanches brillantes.
+  static const crystalBg = Color(0xFFF4F7FB);
+  static const crystalGlass = Color(0xFFFFFFFF);
+
+  static const _darkPalette = AppPalette(
+    emerald: Color(0xFF00F59B),
+    cyan: Color(0xFF00D8FF),
+    violet: Color(0xFF8B5CF6),
+    amber: Color(0xFFFFB800),
+    carmin: Color(0xFFFF2E63),
+    textStrong: Color(0xFFFFFFFF),
+    textSoft: Color(0xFF94A3B8),
+    glass: obsidianGlass,
+    glassBorder: Color(0x17FFFFFF), // blanc 9 %
+    shadow: Color(0xFF000000),
+    isDark: true,
   );
 
-  static final dark = ThemeData(
-    useMaterial3: true,
-    colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
+  static const _lightPalette = AppPalette(
+    emerald: Color(0xFF00C97B),
+    cyan: Color(0xFF00B8E6),
+    violet: Color(0xFF7C3AED),
+    amber: Color(0xFFE6A700),
+    carmin: Color(0xFFEE2B58),
+    textStrong: Color(0xFF0F172A),
+    textSoft: Color(0xFF64748B),
+    glass: crystalGlass,
+    glassBorder: Color(0xFFE2E8F0),
+    shadow: Color(0xFF0F172A),
+    isDark: false,
   );
+
+  static ThemeData dark() => _base(
+        brightness: Brightness.dark,
+        palette: _darkPalette,
+        scaffold: obsidianBg,
+      );
+
+  static ThemeData light() => _base(
+        brightness: Brightness.light,
+        palette: _lightPalette,
+        scaffold: crystalBg,
+      );
+
+  static ThemeData _base({
+    required Brightness brightness,
+    required AppPalette palette,
+    required Color scaffold,
+  }) {
+    final isDark = brightness == Brightness.dark;
+    final textTheme = TextTheme(
+      headlineLarge: AppFonts.title(size: 28, weight: FontWeight.w800, color: palette.textStrong),
+      headlineMedium: AppFonts.title(size: 22, weight: FontWeight.w800, color: palette.textStrong),
+      titleLarge: AppFonts.title(size: 18, weight: FontWeight.w700, color: palette.textStrong),
+      titleMedium: AppFonts.title(size: 15, weight: FontWeight.w700, color: palette.textStrong),
+      titleSmall: AppFonts.title(size: 13, weight: FontWeight.w600, color: palette.textSoft),
+      bodyLarge: AppFonts.label(size: 15, color: palette.textStrong),
+      bodyMedium: AppFonts.label(size: 13, color: palette.textStrong),
+      bodySmall: AppFonts.caption(size: 11.5, color: palette.textSoft),
+      labelLarge: AppFonts.label(size: 13, weight: FontWeight.w700, color: palette.textStrong),
+      labelMedium: AppFonts.label(size: 11, weight: FontWeight.w600, color: palette.textSoft),
+      labelSmall: AppFonts.caption(size: 10, color: palette.textSoft),
+    );
+
+    return ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      scaffoldBackgroundColor: scaffold,
+      colorScheme: ColorScheme(
+        brightness: brightness,
+        primary: isDark ? const Color(0xFF00D8FF) : const Color(0xFF00B8E6),
+        onPrimary: isDark ? const Color(0xFF07090E) : Colors.white,
+        secondary: palette.violet,
+        onSecondary: Colors.white,
+        error: palette.carmin,
+        onError: Colors.white,
+        surface: palette.glass,
+        onSurface: palette.textStrong,
+        surfaceContainerHighest: isDark ? const Color(0xFF1A2130) : const Color(0xFFEDF1F7),
+        outline: palette.glassBorder,
+        onSurfaceVariant: palette.textSoft,
+        shadow: palette.shadow,
+      ),
+      extensions: [palette],
+      textTheme: textTheme,
+      appBarTheme: AppBarTheme(
+        backgroundColor: scaffold,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        centerTitle: false,
+        iconTheme: IconThemeData(color: palette.textStrong),
+        titleTextStyle: AppFonts.title(size: 18, weight: FontWeight.w800, color: palette.textStrong),
+      ),
+      cardTheme: CardTheme(
+        color: palette.glass,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        shadowColor: palette.shadow.withOpacity(isDark ? 0.5 : 0.08),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(22),
+          side: BorderSide(color: palette.glassBorder),
+        ),
+        margin: EdgeInsets.zero,
+      ),
+      dividerTheme: DividerThemeData(color: palette.glassBorder, thickness: 1),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: isDark ? const Color(0xFF0C111B) : Colors.white,
+        hintStyle: AppFonts.caption(size: 13, color: palette.textSoft),
+        labelStyle: AppFonts.caption(size: 13, color: palette.textSoft),
+        helperStyle: AppFonts.caption(size: 10.5, color: palette.textSoft),
+        prefixIconColor: palette.textSoft,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        border: _roundedBorder(palette.glassBorder),
+        enabledBorder: _roundedBorder(palette.glassBorder),
+        focusedBorder: _roundedBorder(palette.cyan, width: 1.6),
+        errorBorder: _roundedBorder(palette.carmin),
+        focusedErrorBorder: _roundedBorder(palette.carmin, width: 1.6),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: palette.cyan,
+          foregroundColor: isDark ? const Color(0xFF07090E) : Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
+          textStyle: AppFonts.label(size: 14, weight: FontWeight.w800),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: palette.cyan,
+          side: BorderSide(color: palette.cyan.withOpacity(0.6), width: 1.4),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+          textStyle: AppFonts.label(size: 13, weight: FontWeight.w700),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          foregroundColor: palette.cyan,
+          textStyle: AppFonts.label(size: 13, weight: FontWeight.w700),
+        ),
+      ),
+      chipTheme: ChipThemeData(
+        backgroundColor: isDark ? const Color(0xFF0C111B) : Colors.white,
+        selectedColor: palette.cyan.withOpacity(0.18),
+        labelStyle: AppFonts.label(size: 12, weight: FontWeight.w600, color: palette.textStrong),
+        side: BorderSide(color: palette.glassBorder),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        showCheckmark: false,
+      ),
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: palette.glass,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        height: 68,
+        indicatorColor: palette.cyan.withOpacity(0.16),
+        labelTextStyle: WidgetStateProperty.resolveWith(
+          (states) => AppFonts.label(
+            size: 11,
+            weight: FontWeight.w700,
+            color: states.contains(WidgetState.selected) ? palette.cyan : palette.textSoft,
+          ),
+        ),
+        iconTheme: WidgetStateProperty.resolveWith(
+          (states) => IconThemeData(
+            size: 22,
+            color: states.contains(WidgetState.selected) ? palette.cyan : palette.textSoft,
+          ),
+        ),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: isDark ? const Color(0xFF1A2130) : const Color(0xFF0F172A),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        contentTextStyle: AppFonts.label(size: 13, color: Colors.white),
+      ),
+      progressIndicatorTheme: ProgressIndicatorThemeData(color: palette.cyan),
+      sliderTheme: SliderThemeData(
+        activeTrackColor: palette.cyan,
+        inactiveTrackColor: palette.cyan.withOpacity(0.18),
+        thumbColor: palette.cyan,
+        trackHeight: 5,
+      ),
+      switchTheme: SwitchThemeData(
+        thumbColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.selected) ? palette.cyan : palette.textSoft,
+        ),
+        trackColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.selected)
+              ? palette.cyan.withOpacity(0.3)
+              : palette.glassBorder,
+        ),
+      ),
+    );
+  }
+
+  static OutlineInputBorder _roundedBorder(Color color, {double width = 1}) => OutlineInputBorder(
+        borderRadius: BorderRadius.circular(16),
+        borderSide: BorderSide(color: color, width: width),
+      );
 }

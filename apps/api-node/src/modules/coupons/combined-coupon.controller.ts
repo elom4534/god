@@ -60,6 +60,16 @@ export class CombinedCouponController {
     };
   }
 
+  /**
+   * Détail multi-marchés d'un match : toutes les sélections validées
+   * (1X2, Double Chance, O/U, BTTS, Handicaps, Corners…) avec probabilités
+   * réelles, relues en direct chez MegaPari.
+   */
+  @Get('match-picks')
+  async matchPicks(@Query('event_id') eventId?: string) {
+    return this.svc.getMatchPicks(String(eventId ?? ''));
+  }
+
   /** Code coupon d'une sélection de la composition (mode PER_PICK). */
   @Post('pick-code')
   @HttpCode(201)
