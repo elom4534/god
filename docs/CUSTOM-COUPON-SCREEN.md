@@ -244,70 +244,66 @@ L'ETL interroge `Count` (max 1000) sur LoadSingle, récupère le **répertoire d
 
 ---
 
-## 5. Code coupon combiné (vérifié le 20/10/2026)
+## 5. Codes coupon : un code par sélection (constat du 21/10/2026)
 
-Le manager MegaPari a confirmé que la génération d'un code pour un combiné est autorisée.
-Vérification faite sur la passerelle BetB2B : `sharecoupon` **accepte les paramètres
-répétés** et renvoie un vrai code combiné.
+> **Correction importante.** Le 20/10/2026 nous avions conclu qu'un code unique
+> pouvait porter tout le combiné, parce que la passerelle renvoyait bien un code
+> pour une requête à paramètres répétés. **C'était faux** : ce code ne contient
+> que la **première** sélection. Symptôme côté utilisateur : « quel que soit le
+> code généré, cela renvoie toujours au même match » (le premier du combiné).
 
+### Preuve technique
+
+`GET /datafeed/directories/api/v1/sharecoupon` est un service ASP.NET Core dont
+les paramètres sont **scalaires** :
+
+```http
+GET …/sharecoupon?ref=192&sportEventId=761652414,761652858&type=1&…
+→ 400 {"errors":{"sportEventId":["The value '761652414,761652858' is not valid."]}}
 ```
-GET {gateway}/datafeed/directories/api/v1/sharecoupon
-    ?ref=192
-    &sportEventId=A&type=1&oddsMarket=1.229&parameter=0&playerId=0
-    &sportEventId=B&type=1&oddsMarket=1.291&parameter=0&playerId=0
-    &kind=3&gr=0&cnt=0&lng=en
-→ "https://megapari.com/en?coupon-code=XXXXX"
-```
 
-**Les cinq champs d'une sélection sont un bloc positionnel** :
-`sportEventId`, `type`, `oddsMarket`, `parameter`, `playerId`. Ils sont émis
-**systématiquement, dans cet ordre, pour chaque sélection** (valeur `0` par
-défaut). Un bloc incomplet décale la correspondance des blocs suivants : le
-coupon pointe alors vers de mauvais marchés et MegaPari le déclare « terminé ».
-Les sélections sont triées (`event`, `type`, `parameter`) pour que deux
-combinés identiques produisent exactement la même requête.
+Le binder valide `sportEventId` comme un `int` unique. Quand les paramètres sont
+**répétés** (`…&sportEventId=A&sportEventId=B`), ASP.NET Core lie silencieusement
+la **première** valeur : la passerelle ne transmet donc qu'**une seule**
+sélection à `LiveBetService`, et le coupon créé contient un seul match — le
+premier de la liste (tri par `sportEventId`). La doc OpenAPI le confirme : tous
+les paramètres sont documentés au singulier, sans `array`, sans `style/explode`.
 
-- La réponse est une **chaîne JSON entre guillemets** ; `coupon-code=` est extrait.
-- 50 sélections tiennent dans **une seule requête** (testé : cotes 1.04 → 1.29, code `RYZ1H`).
-- Le endpoint **ne valide rien** (un `type` inexistant renvoie quand même un code) :
-  la validation métier reste côté composition (marge, marchés réels).
-- `couponCode` est renvoyé avant la liste des sélections dans l'UI : plus besoin de
-  faire défiler 50 lignes pour récupérer le code.
+Conséquence : **un code unique pour un combiné de N matchs est impossible avec
+l'API partenaire.** Le bouton « partager » du site, lui, passe par le service
+interne du bookmaker (session joueur), inaccessible à un partenaire marketing.
 
-### Cotes live vs cache
+### Ce que fait le moteur depuis le 21/10/2026
 
-| | Avant | Maintenant |
-|---|---|---|
-| source | cache Redis ETL (10 min) | **LoadSingle v2 au clic** (`live-odds.ts`) |
-| fraîcheur | jusqu'à 15 min (TTL) | quelques secondes |
-| probabilité | non calculée (choix « au plus proche de la cible ») | **fair odds**, filtre ≥ 70 % |
-| panne bookmaker | on servait du cache périmé | erreur explicite `LIVE_FEED_UNAVAILABLE`, **jamais de cote périmée** |
+| Avant | Maintenant |
+|---|---|
+| un « code combiné » trompeur (1 seul match dedans) | **aucun faux code combiné** : `couponMode = "PER_PICK"` |
+| l'utilisateur collait un code et voyait un match | un **code par sélection**, chacun ouvrant **exactement** son match |
+| codes générés à la volée, 400 en rafale | un code toutes les **6 s** (`MEGAPARI_SHARE_INTERVAL_MS`), cooldown 65 s si la passerelle refuse |
 
-Le cache Redis reste utilisé **uniquement** pour les compteurs d'affichage
-(`/coupons/sports`, disponibilité) — jamais pour composer un combiné.
+Endpoints :
 
-### Contrat `sharecoupon` (relu dans l'OpenAPI le 20/10/2026)
+- `POST /api/v1/coupons/generate-combined` → composition seule. Réponse :
+  `couponMode: "PER_PICK"`, `couponCode: null`, `codes_required: N`,
+  `code_endpoint: "/api/v1/coupons/pick-code"`, `picks[]` (le détail par match).
+- `POST /api/v1/coupons/pick-code` `{event_id, selection_id}` → **le code du
+  match demandé** (`couponCode`, `deepLink`, `home`, `away`, `selection_name`,
+  `odds`). Cotes relues **en direct** à chaque appel (jamais le cache), et la
+  réponse identifie le match pour qu'aucune confusion ne soit possible.
+- L'écran Flutter affiche « Générer les N codes » : les codes sont demandés un
+  par un (6,5 s d'espacement côté client, compte à rebours géré).
 
-`GET /datafeed/directories/api/v1/sharecoupon` — paramètres **répétés**, un bloc
-par sélection, dans cet ordre :
+### Ce qu'il faut demander au manager MegaPari
 
-| Paramètre | Valeur envoyée | Remarque |
-|---|---|---|
-| `sportEventId` | `sportEventId` du flux | requis |
-| `type` | `oddsLocalization.type` | 1 = 1X2, 10 = Total Under… |
-| `oddsMarket` | `oddsLocalization.oddsMarket` | **la cote**, pas un id de marché |
-| `parameter` | `oddsLocalization.parameter` (0 par défaut) | `8.5` pour un total |
-| `playerId` | `oddsLocalization.playerId` (0 par défaut) | > 0 = marché joueur |
+Un endpoint partenaire qui crée un coupon **multi-sélections** (celui utilisé par
+le bouton « partager » du site), ou le format de lien « betslip » pré-rempli.
+Tant qu'il n'existe pas, un code = un match.
 
-Puis `kind=3` (3 = **Line**, 1 = Live), `gr=0`, `cnt=0`, `lng=en`.
-Les cinq champs d'une sélection sont **positionnels** : un bloc incomplet décale
-tous les suivants. Réponse : une chaîne JSON `"https://…?coupon-code=XXXXX"`.
-
-### Limite de débit : 1 code / minute
+### Limite de débit (mesurée le 21/10/2026)
 
 | Constat | Correctif |
 |---|---|
-| 2 créations rapprochées → 400 « LiveBetService returned 200 » | **créneau partagé** Redis `bookmaker:share-slot:megapari` (`MEGAPARI_SHARE_INTERVAL_MS`, 65 s) |
+| 2 créations rapprochées → 400 « LiveBetService returned 200 » | **créneau partagé** Redis `bookmaker:share-slot:megapari` (`MEGAPARI_SHARE_INTERVAL_MS`, **6 s** depuis le 21/10 — 3 coupons mono-sélection consécutifs à 5 s d'intervalle ont été acceptés) |
 | Bloquer la requête pour attendre = coupure du proxy Alwaysdata (~30 s) | l'API répond **en < 1 s** avec `retry_after_seconds` |
 | L'utilisateur devait recliquer | l'app **attend le délai en affichant un compte à rebours**, puis relance automatiquement (3 essais max) |
 
@@ -342,6 +338,6 @@ des matchs du lendemain à 19:00 UTC, soit ~20 h de marge.
 | `getAccessToken` → HTTP 400 | décoder `&amp;` dans `client_secret` |
 | `setEx` « Invalid argument type » | signature `setEx(key, ttl, value)` |
 | `GET sharecoupon` → 400 « LiveBetService returned 200 » alors que curl passe | en-tête `Accept: */*` obligatoire |
-| 400 sur tous les appels pendant ~1 min | créneau 1 code/65 s + `retry_after_seconds` + reprise auto côté app |
+| 400 sur tous les appels pendant ~1 min | créneau 6 s + cooldown 65 s dès qu'un refus survient (`markShareRejected`) + `retry_after_seconds` + reprise auto côté app |
 | mêmes sélections re-testées sans fin | cache coupon 15 min |
 | deux combinés distincts recevaient **le même code** | clé de cache tronquée (base64 90 car.) → **SHA-1** de la signature complète |

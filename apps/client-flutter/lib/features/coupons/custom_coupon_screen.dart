@@ -49,6 +49,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
 
   /// Codes générés à la demande, par sélection (un coupon MegaPari = un marché).
   final Map<String, _PickCodeState> _pickCodes = {};
+  bool _bulkRunning = false;
 
   /// Sports réels proposés par le bookmaker (`{id, name, events, picks, available}`).
   List<Map<String, dynamic>> _sports = const [];
@@ -300,7 +301,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
   }
 
   /// Génère le code coupon d'une sélection (MegaPari : 1 coupon = 1 marché).
-  Future<void> _fetchPickCode(String eventId, String selectionId) async {
+  Future<void> _fetchPickCode(String eventId, String selectionId, {bool silent = false}) async {
     final key = '$eventId|$selectionId';
     if (_pickCodes[key]?.loading == true) return;
     setState(() => _pickCodes[key] = const _PickCodeState(loading: true));
@@ -321,7 +322,7 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               code: code,
               deepLink: decoded['deepLink']?.toString(),
             ));
-        if (code != null) {
+        if (code != null && !silent) {
           await Clipboard.setData(ClipboardData(text: code));
           _snack(Localizations.localeOf(context).languageCode == 'fr'
               ? 'Code $code copié ✓'
@@ -334,6 +335,33 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
       setState(() => _pickCodes[key] = _PickCodeState(error: _humanError(code, decoded)));
     } catch (e) {
       setState(() => _pickCodes[key] = _PickCodeState(error: 'Réseau : $e'));
+    }
+  }
+
+  /// Génère les codes de toutes les sélections, une par une.
+  ///
+  /// L'API partenaire MegaPari ne crée un coupon que pour UNE sélection : un
+  /// combiné de N matchs donne N codes. La passerelle accepte environ un code
+  /// toutes les 6 s (mesuré), d'où l'espacement — au-delà, elle répond 400
+  /// « LiveBetService returned 200 » et il faut attendre une minute.
+  Future<void> _fetchAllPickCodes(List<dynamic> picks, bool isFr) async {
+    if (_bulkRunning) return;
+    setState(() => _bulkRunning = true);
+    try {
+      for (final raw in picks) {
+        final m = raw as Map<String, dynamic>;
+        final key = '${m['event_id']}|${m['selection_id']}';
+        if (_pickCodes[key]?.code != null) continue;
+        if (!mounted) return;
+        await _fetchPickCode('${m['event_id']}', '${m['selection_id']}', silent: true);
+        if (!mounted) return;
+        await Future.delayed(const Duration(milliseconds: 6500));
+      }
+      if (mounted) {
+        _snack(isFr ? 'Codes générés ✓' : 'Codes generated ✓');
+      }
+    } finally {
+      if (mounted) setState(() => _bulkRunning = false);
     }
   }
 
@@ -498,8 +526,8 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
               const SizedBox(height: 16),
               Text(
                 isFr
-                    ? 'Cotes relues EN DIRECT chez MegaPari à chaque clic. Seules les sélections ayant au moins 70 % de chances de passer sont retenues. Les matchs sont ceux d\'aujourd\'hui, complétés par demain si nécessaire — jamais au-delà — et leur coup d\'envoi doit être à plus de 30 min (sinon le coupon serait déjà en live chez MegaPari). Un seul code coupon.'
-                    : 'Odds fetched LIVE from MegaPari on every click. Only selections with at least 70% chance of winning are kept. Matches are today\'s only; if the selection cannot be built, tomorrow is used — never beyond. One single coupon code.',
+                    ? 'Cotes relues EN DIRECT chez MegaPari à chaque clic. Seules les sélections ayant au moins 70 % de chances de passer sont retenues. Les matchs sont ceux d\'aujourd\'hui, complétés par demain si nécessaire — jamais au-delà — et leur coup d\'envoi doit être à plus de 30 min (sinon le coupon serait déjà en live chez MegaPari). Un code par match (limite de l\'API partenaire MegaPari).'
+                    : 'Odds fetched LIVE from MegaPari on every click. Only selections with at least 70% chance of winning are kept. Matches are today\'s only; if the selection cannot be built, tomorrow is used — never beyond. One code per match (MegaPari partner API limit).',
                 style: TextStyle(fontSize: 10.5, color: Colors.grey[600], height: 1.35),
                 textAlign: TextAlign.center,
               ),
@@ -1053,9 +1081,16 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
         if (couponCode != null && couponCode.isNotEmpty && deepLink != null) ...[
           const SizedBox(height: 12),
           _howToCard(isFr),
-        ] else if (couponMode == 'NONE') ...[
+        ] else if (couponMode == 'NONE' || couponMode == 'PER_PICK') ...[
           const SizedBox(height: 14),
-          _multiCouponNotice(isFr),
+          _multiCouponNotice(
+            isFr,
+            count: picks.length,
+            onGenerateAll: couponMode == 'PER_PICK' && picks.isNotEmpty
+                ? () => _fetchAllPickCodes(picks, isFr)
+                : null,
+            running: _bulkRunning,
+          ),
           if (deepLink != null) ...[
             const SizedBox(height: 10),
             OutlinedButton.icon(
@@ -1340,7 +1375,12 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
     }
   }
 
-  Widget _multiCouponNotice(bool isFr) {
+  Widget _multiCouponNotice(
+    bool isFr, {
+    int count = 0,
+    VoidCallback? onGenerateAll,
+    bool running = false,
+  }) {
     return Container(
       padding: const EdgeInsets.all(13),
       decoration: BoxDecoration(
@@ -1370,10 +1410,25 @@ class _CustomCouponScreenState extends State<CustomCouponScreen> {
           const SizedBox(height: 6),
           Text(
             isFr
-                ? 'MegaPari n\'autorise la création que d\'un code par marché. Ajoute chaque sélection dans l\'app pour composer ton combiné, ou utilise la cote et le libellé ci-dessus comme référence.'
-                : 'MegaPari only lets us create one code per market. Add each selection in the app to build your accumulator, or use the odds and label above as reference.',
+                ? 'L\'API partenaire de MegaPari ne crée un coupon que pour UN match à la fois : un code unique pour $count sélections est techniquement impossible (les paramètres sont scalaires côté bookmaker). Chaque code ci-dessous ouvre exactement son match — ajoute-les l\'un après l\'autre au coupon MegaPari.'
+                : 'MegaPari\'s partner API creates a coupon for ONE match at a time: a single code for $count selections is technically impossible (the bookmaker\'s parameters are scalar). Each code below opens exactly its match — add them one after another to the MegaPari coupon.',
             style: TextStyle(fontSize: 11.5, height: 1.35, color: Colors.grey[800]),
           ),
+          if (onGenerateAll != null) ...[
+            const SizedBox(height: 10),
+            FilledButton.icon(
+              onPressed: running ? null : onGenerateAll,
+              icon: running
+                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.qr_code_2, size: 18),
+              label: Text(
+                running
+                    ? (isFr ? 'Génération… (1 code / 6 s)' : 'Generating… (1 code / 6 s)')
+                    : (isFr ? 'Générer les $count codes' : 'Generate all $count codes'),
+              ),
+              style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
+            ),
+          ],
         ],
       ),
     );

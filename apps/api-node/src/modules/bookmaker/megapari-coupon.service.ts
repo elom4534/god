@@ -243,7 +243,12 @@ export class MegaPariCouponService {
    * garantit des réponses < 1 s dans tous les cas.
    */
   private async acquireShareSlot(): Promise<void> {
-    const interval = parseInt(process.env.MEGAPARI_SHARE_INTERVAL_MS || '65000', 10);
+    // Mesuré le 21/10/2026 : trois coupons MONO-SÉLECTION consécutifs passent
+    // très bien à 5 s d'intervalle (HTTP 200, codes 2KVHH / DMVHH / UNVHH).
+    // La contrainte forte (~1 code/minute) ne s'applique qu'aux rafales ; on
+    // garde donc 6 s par défaut et on bascule sur un cooldown de 65 s dès que
+    // la passerelle refuse (markShareRejected).
+    const interval = parseInt(process.env.MEGAPARI_SHARE_INTERVAL_MS || '6000', 10);
     const redis = await getRedis();
     const key = `bookmaker:share-slot:${this.provider}`;
     const now = Date.now();
@@ -294,7 +299,9 @@ export class MegaPariCouponService {
       }
     }
 
-    // Créneau réservé sans blocage (cf. acquireShareSlot).
+    // Créneau réservé sans blocage (cf. acquireShareSlot) : vaut pour TOUS les
+    // chemins (coupon simple, sélection par sélection).
+    await this.acquireShareSlot();
     const token = await this.getAccessToken();
 
     // Extraction champs B2B — fallback depuis Pick si b2b_* nonfournis mais market_type connu
@@ -455,7 +462,22 @@ export class MegaPariCouponService {
       }
     }
 
-    await this.acquireShareSlot();
+    // ⚠️ CONTRAT : `sharecoupon` ne crée un coupon que pour UNE sélection.
+    // Les paramètres `sportEventId`, `type`, `oddsMarket`, `parameter` et
+    // `playerId` sont des scalaires côté passerelle (preuve du 21/10/2026 :
+    // `sportEventId=1,2` → 400 « The value '1,2' is not valid »). Répéter les
+    // paramètres ne crée donc PAS un combiné : la passerelle ne retient que la
+    // PREMIÈRE sélection, et le coupon s'ouvre sur un seul match.
+    if (picks.length !== 1) {
+      throw new BadRequestException({
+        error: 'B2B_COUPON_FAILED',
+        reason_code: 'COMBINED_COUPON_UNSUPPORTED',
+        message:
+          "L'API partenaire MegaPari ne crée un coupon que pour UNE sélection : un code unique pour plusieurs matchs est impossible. Génère un code par sélection.",
+        details: { asked: picks.length, supported: 1 },
+      });
+    }
+
     const token = await this.getAccessToken();
 
     // ⚠️ Les paramètres sont répétés N fois (un bloc par sélection) : la

@@ -883,8 +883,11 @@ export class CombinedCouponService {
         success = false;
         message = body?.message || e?.message || 'Échec de la génération du coupon MegaPari';
       }
-    } else if (includeIndividualCodes) {
-      // 2) Mode explicite « un code par sélection » (fallback manuel).
+    } else if (includeIndividualCodes && b2bPicks.length <= 3) {
+      // 2) Mode explicite « un code par sélection », limité à 3 sélections :
+      //    chaque création coûte ~6 s côté passerelle et le proxy Alwaysdata
+      //    coupe au-delà de 30 s. Au-delà, c'est le client qui pilote les appels
+      //    (POST /coupons/pick-code), un code par clic.
       const results = await this.mega.generateSeparateCoupons(b2bPicks, { currency, language });
       couponMode = 'PER_PICK';
       let ok = 0;
@@ -910,39 +913,20 @@ export class CombinedCouponService {
         ? `${ok} codes générés — un par sélection.`
         : `${ok}/${picks.length} codes générés — certains marchés ne sont plus disponibles.`;
     } else {
-      // 3) Cas nominal : UN code coupon pour tout le combiné (confirmé par le
-      //    manager MegaPari). Toutes les sélections partent dans la même requête.
-      try {
-        const res = await this.mega.shareCouponCombined(b2bPicks, { language });
-        couponMode = 'COMBO';
-        couponCode = res.couponCode;
-        deepLink = res.deepLink;
-        message = `Code coupon combiné généré (${picks.length} sélections) — code ${res.couponCode}`;
-        coupons.push({
-          event_id: '*',
-          home: '',
-          away: '',
-          selection_name: `${picks.length} sélections`,
-          market_type: 'COMBO',
-          line: null,
-          odds: composed.totalOdds,
-          success: true,
-          couponCode: res.couponCode,
-          deepLink: res.deepLink,
-          error: null,
-        });
-      } catch (e: any) {
-        const body = e?.getResponse?.() ?? e?.response?.data ?? null;
-        const reason = typeof body?.reason_code === 'string' ? body.reason_code : 'B2B_COUPON_FAILED';
-        success = false;
-        couponMode = 'NONE';
-        message = body?.message || e?.message || 'Échec de la génération du coupon combiné MegaPari';
-        const ra = body?.details?.retry_after_seconds;
-        if (reason === 'B2B_RATE_LIMITED' && Number.isFinite(Number(ra))) {
-          retryAfterSeconds = Number(ra);
-        }
-        this.logger.warn(`[COMBINED] coupon combiné indisponible (${reason}) — fallback sélection par sélection`);
-      }
+      // 3) Combiné de N > 1 sélections : l'API partenaire MegaPari ne sait créer
+      //    un coupon que pour UNE sélection (paramètres scalaires côté
+      //    passerelle : `sportEventId=1,2` renvoie « The value '1,2' is not
+      //    valid »). Répéter les paramètres ne produit donc PAS un combiné : le
+      //    coupon ne contient que la PREMIÈRE sélection, ce qui donnait
+      //    l'impression que « tous les codes ouvrent le même match ».
+      //    → on ne fabrique plus de faux code combiné : un code par sélection,
+      //      à la demande via POST /coupons/pick-code (6 s d'intervalle).
+      couponMode = 'PER_PICK';
+      couponCode = null;
+      deepLink = null;
+      success = true;
+      message =
+        `${picks.length} codes à générer (un par sélection) : l'API MegaPari ne crée un coupon que pour un seul match à la fois.`;
     }
 
     this.logger.log(JSON.stringify({
@@ -982,6 +966,9 @@ export class CombinedCouponService {
       deepLink,
       message,
       retry_after_seconds: retryAfterSeconds,
+      // Un code par sélection (le seul format que l'API partenaire sait créer).
+      codes_required: picks.length,
+      code_endpoint: '/api/v1/coupons/pick-code',
       // Traçabilité : d'où viennent les cotes et quelle règle a été appliquée.
       source: 'live',
       odds_as_of: live.asOf,
@@ -1030,7 +1017,10 @@ export class CombinedCouponService {
       });
     }
 
-    const picks = await this.loadValuePicks();
+    // Cotes LIVE obligatoires : on relit le flux MegaPari au moment du clic,
+    // jamais le cache ETL (règle produit).
+    const live = await this.loadLivePicks(null);
+    const picks = live.picks;
     const pick = picks.find(p => p.event_id === String(eventId) && p.selection_id === String(selectionId));
     if (!pick) {
       throw new BadRequestException({
